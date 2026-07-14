@@ -1,122 +1,138 @@
 stage: 1
-name: "LLM Council"
-description: "Four-phase expert council: Research → Vision → Narrative → Treatment"
-
+name: LLM Council
+description: "Four-phase expert council: Research \u2192 Vision \u2192 Narrative \u2192\
+  \ Treatment"
 llm:
-  provider: "runware"
-  model: "anthropic-claude-opus-4-7"
+  provider: runware
+  model: anthropic-claude-opus-4-7
   max_tokens: 4096
-
 phases:
-  - id: research
-    name: "Research & Grounding"
-    description: "Domain experts produce briefings on current trajectories toward abundance"
-    parallel: false
-    checkpoint: false
-    experts:
-      - id: energy_analyst
-        role: "Energy Transition Analyst"
-        prompt_file: "prompts/experts/energy_analyst.md"
-      - id: biotechnologist
-        role: "Biotechnologist"
-        prompt_file: "prompts/experts/biotechnologist.md"
-      - id: ai_researcher
-        role: "AI Systems Researcher"
-        prompt_file: "prompts/experts/ai_researcher.md"
-      - id: materials_scientist
-        role: "Materials Scientist"
-        prompt_file: "prompts/experts/materials_scientist.md"
-      - id: climate_scientist
-        role: "Climate Scientist"
-        prompt_file: "prompts/experts/climate_scientist.md"
-      - id: economist
-        role: "Economist"
-        prompt_file: "prompts/experts/economist.md"
-      - id: urban_planner
-        role: "Urban Planner"
-        prompt_file: "prompts/experts/urban_planner.md"
-      - id: governance_researcher
-        role: "Governance Researcher"
-        prompt_file: "prompts/experts/governance_researcher.md"
-
-  - id: vision
-    name: "Vision Synthesis"
-    description: "Integrate research into a unified, stress-tested vision of the future"
-    parallel: false
-    checkpoint: true
-    experts:
-      - id: futurist_integrator
-        role: "Futurist Integrator"
-        prompt_file: "prompts/experts/futurist_integrator.md"
-        receives: ["all_research"]
-      - id: anthropologist
-        role: "Anthropologist"
-        prompt_file: "prompts/experts/anthropologist.md"
-        receives: ["futurist_integrator"]
-      - id: psychologist
-        role: "Psychologist"
-        prompt_file: "prompts/experts/psychologist.md"
-        receives: ["futurist_integrator", "anthropologist"]
-      - id: historian
-        role: "Historian"
-        prompt_file: "prompts/experts/historian.md"
-        receives: ["futurist_integrator", "anthropologist", "psychologist"]
-      - id: skeptic
-        role: "Skeptic / Red Team"
-        prompt_file: "prompts/experts/skeptic.md"
-        receives: ["futurist_integrator", "anthropologist", "psychologist", "historian"]
-
-  - id: narrative
-    name: "Narrative Architecture"
-    description: "Shape the vision into a 3-minute cinematic story"
-    parallel: false
-    checkpoint: true
-    experts:
-      - id: screenwriter
-        role: "Screenwriter"
-        prompt_file: "prompts/experts/screenwriter.md"
-        receives: ["vision_document"]
-      - id: cinematic_director
-        role: "Cinematic Director"
-        prompt_file: "prompts/experts/cinematic_director.md"
-        receives: ["screenwriter"]
-      - id: lore_keeper
-        role: "Lore Keeper"
-        prompt_file: "prompts/experts/lore_keeper.md"
-        receives: ["screenwriter", "cinematic_director"]
-      - id: poet
-        role: "Poet / Lyricist"
-        prompt_file: "prompts/experts/poet.md"
-        receives: ["screenwriter", "cinematic_director", "lore_keeper"]
-
-  - id: treatment
-    name: "Treatment & Deliverable Assembly"
-    description: "Produce the final 12-page treatment and production-ready scene breakdown"
-    parallel: false
-    checkpoint: true
-    experts:
-      - id: treatment_writer
-        role: "Treatment Writer"
-        prompt_file: "prompts/experts/treatment_writer.md"
-        receives: ["narrative_document"]
-      - id: scene_architect
-        role: "Scene Architect"
-        prompt_file: "prompts/experts/scene_architect.md"
-        receives: ["narrative_document", "treatment_writer"]
-
+- id: research
+  name: Research & Grounding
+  description: Domain experts produce briefings on current trajectories toward abundance
+  mode: parallel
+  checkpoint: false
+  experts:
+  - id: energy_analyst
+    role: Energy Transition Analyst
+    prompt_file: prompts/experts/energy_analyst.md
+  - id: biotechnologist
+    role: Biotechnologist
+    prompt_file: prompts/experts/biotechnologist.md
+  - id: ai_researcher
+    role: AI Systems Researcher
+    prompt_file: prompts/experts/ai_researcher.md
+  - id: materials_scientist
+    role: Materials Scientist
+    prompt_file: prompts/experts/materials_scientist.md
+  - id: climate_scientist
+    role: Climate Scientist
+    prompt_file: prompts/experts/climate_scientist.md
+  - id: economist
+    role: Economist
+    prompt_file: prompts/experts/economist.md
+  - id: urban_planner
+    role: Urban Planner
+    prompt_file: prompts/experts/urban_planner.md
+  - id: governance_researcher
+    role: Governance Researcher
+    prompt_file: prompts/experts/governance_researcher.md
+- id: vision
+  name: Vision Synthesis
+  description: Integrate research into a unified, stress-tested vision of the future
+  mode: parallel
+  checkpoint: true
+  experts:
+  - id: futurist_integrator
+    role: Futurist Integrator
+    prompt_file: prompts/experts/futurist_integrator.md
+    receives:
+    - all_research
+  - id: anthropologist
+    role: Anthropologist
+    prompt_file: prompts/experts/anthropologist.md
+    receives:
+    - futurist_integrator
+  - id: psychologist
+    role: Psychologist
+    prompt_file: prompts/experts/psychologist.md
+    receives:
+    - futurist_integrator
+    - anthropologist
+  - id: historian
+    role: Historian
+    prompt_file: prompts/experts/historian.md
+    receives:
+    - futurist_integrator
+    - anthropologist
+    - psychologist
+  - id: skeptic
+    role: Skeptic / Red Team
+    prompt_file: prompts/experts/skeptic.md
+    receives:
+    - futurist_integrator
+    - anthropologist
+    - psychologist
+    - historian
+- id: narrative
+  name: Narrative Architecture
+  description: Shape the vision into a 3-minute cinematic story
+  mode: parallel
+  checkpoint: true
+  experts:
+  - id: screenwriter
+    role: Screenwriter
+    prompt_file: prompts/experts/screenwriter.md
+    receives:
+    - vision_document
+  - id: cinematic_director
+    role: Cinematic Director
+    prompt_file: prompts/experts/cinematic_director.md
+    receives:
+    - screenwriter
+  - id: lore_keeper
+    role: Lore Keeper
+    prompt_file: prompts/experts/lore_keeper.md
+    receives:
+    - screenwriter
+    - cinematic_director
+  - id: poet
+    role: Poet / Lyricist
+    prompt_file: prompts/experts/poet.md
+    receives:
+    - screenwriter
+    - cinematic_director
+    - lore_keeper
+- id: treatment
+  name: Treatment & Deliverable Assembly
+  description: Produce the final 12-page treatment and production-ready scene breakdown
+  mode: parallel
+  checkpoint: true
+  experts:
+  - id: treatment_writer
+    role: Treatment Writer
+    prompt_file: prompts/experts/treatment_writer.md
+    receives:
+    - narrative_document
+  - id: scene_architect
+    role: Scene Architect
+    prompt_file: prompts/experts/scene_architect.md
+    receives:
+    - narrative_document
+    - treatment_writer
 outputs:
-  - type: research_briefing
-    phase: research
-    description: "8 domain expert briefings on abundance trajectories"
-  - type: vision_document
-    phase: vision
-    description: "Integrated future vision with daily-life grounding"
-  - type: narrative
-    phase: narrative
-    description: "Story arc, scene breakdown, and narration draft"
-  - type: scene_breakdown
-    phase: narrative
-    description: "Shot-by-shot breakdown with timing for 3-minute trailer"
-  - type: treatment
-    phase: treatment
-    description: "12-page film treatment document"
+- type: research_briefing
+  phase: research
+  description: 8 domain expert briefings on abundance trajectories
+- type: vision_document
+  phase: vision
+  description: Integrated future vision with daily-life grounding
+- type: narrative
+  phase: narrative
+  description: Story arc, scene breakdown, and narration draft
+- type: scene_breakdown
+  phase: narrative
+  description: Shot-by-shot breakdown with timing for 3-minute trailer
+- type: treatment
+  phase: treatment
+  description: 12-page film treatment document

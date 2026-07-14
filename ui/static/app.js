@@ -185,6 +185,12 @@ function renderCouncilPanel() {
           <div class="phase-title"><h4>${phase.name}</h4><p>${phase.description}</p></div>
           <span class="status-badge status-${phase.status}">${phase.status}</span>
         </div>
+        <div class="phase-mode-bar">
+          <span class="phase-mode-label">Mode:</span>
+          <button class="phase-mode-btn ${phase.mode === 'parallel' ? 'active' : ''}" onclick="event.stopPropagation(); setPhaseMode('${phase.id}', 'parallel')">Parallel</button>
+          <button class="phase-mode-btn ${phase.mode === 'sequential' ? 'active' : ''}" onclick="event.stopPropagation(); setPhaseMode('${phase.id}', 'sequential')">Sequential</button>
+          <span class="phase-mode-desc">${phase.mode === 'parallel' ? 'Experts run independently, previous phase context only' : 'Experts chain within phase + previous phase context'}</span>
+        </div>
         <div class="phase-experts">
           ${phase.experts.map(e => {
             const done = !!expertResults[e.id];
@@ -247,7 +253,10 @@ function renderProgressPanel(stage) {
         const isRunning = runningExperts.has(e.id);
 
         if (result) {
-          const summary = extractSummary(result.content);
+          const hasSummary = !!result.summary;
+          const summaryHtml = hasSummary
+            ? `<div class="progress-summary-llm" onclick="openExpertModal('${e.id}')">${renderMarkdown(result.summary)}</div>`
+            : `<div class="progress-summary-actions"><button class="btn btn-sm" onclick="event.stopPropagation(); summarizeExpert('${e.id}')">Generate Summary</button></div>`;
           html += `
             <div class="progress-expert done">
               <div class="progress-expert-header">
@@ -258,7 +267,7 @@ function renderProgressPanel(stage) {
                   <button class="btn-icon btn-icon-danger" onclick="deleteExpertResult('${e.id}')" title="Delete">✕</button>
                 </div>
               </div>
-              <ul class="progress-summary" onclick="openExpertModal('${e.id}')">${summary}</ul>
+              ${summaryHtml}
             </div>`;
         } else if (isRunning) {
           html += `
@@ -307,6 +316,23 @@ async function deleteExpertResult(expertId) {
   await fetchPipeline();
 }
 
+async function summarizeExpert(expertId) {
+  showToast('Generating summary...');
+  try {
+    const res = await fetch(`/api/council/expert/${expertId}/summarize`, { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      showToast('Summary generated');
+      await fetchExpertResults();
+      render();
+    } else {
+      showToast(`Error: ${data.error}`);
+    }
+  } catch (e) {
+    showToast(`Error: ${e.message}`);
+  }
+}
+
 async function rerunExpert(expertId, customPrompt = null) {
   showToast('Rerunning expert...');
   try {
@@ -343,6 +369,7 @@ function extractSummary(content) {
     } else if (currentHeader && line.length > 20 && !line.startsWith('#') && !line.startsWith('```')) {
       // First substantive line after a header
       let text = line.replace(/^[-*]\s*/, '').replace(/\*\*/g, '').replace(/\*/g, '');
+      if (text.length > 200) text = text.substring(0, 197) + '...';
       items.push(`<li><strong>${escapeHtml(currentHeader)}:</strong> ${escapeHtml(text)}</li>`);
       currentHeader = null;
     }
@@ -350,7 +377,7 @@ function extractSummary(content) {
 
   if (items.length === 0) {
     const meaningful = lines.filter(l => l.trim().length > 20).slice(0, 4);
-    return meaningful.map(l => `<li>${escapeHtml(l.trim())}</li>`).join('');
+    return meaningful.map(l => { let t = l.trim(); if (t.length > 200) t = t.substring(0, 197) + '...'; return `<li>${escapeHtml(t)}</li>`; }).join('');
   }
   return items.join('');
 }
@@ -401,10 +428,13 @@ async function openExpertModal(expertId) {
         <button class="gen-tab" onclick="showModalTab(this, 'modal-rerun')">Rerun with Prompt</button>
       </div>
       <div id="modal-summary" class="modal-content-area">
-        <div class="modal-summary-card">
-          <h4>Key Points & Takeaways</h4>
-          <div class="modal-summary-list">${summary}</div>
-        </div>
+        ${result.summary
+          ? `<div class="modal-summary-card"><div class="modal-summary-llm">${renderMarkdown(result.summary)}</div></div>`
+          : `<div class="modal-summary-card">
+              <div class="modal-summary-list">${summary}</div>
+              <div style="margin-top:1rem;"><button class="btn btn-primary btn-sm" onclick="summarizeExpertInModal('${expertId}')">Generate LLM Summary</button></div>
+            </div>`
+        }
       </div>
       <div id="modal-full" class="modal-content-area" style="display:none;">
         <div class="modal-full-output">${renderMarkdown(result.content)}</div>
@@ -473,6 +503,12 @@ async function sendExpertChat(expertId) {
   }
 }
 
+async function summarizeExpertInModal(expertId) {
+  showToast('Generating summary...');
+  await summarizeExpert(expertId);
+  openExpertModal(expertId);
+}
+
 async function rerunExpertFromModal(expertId) {
   showToast('Rerunning expert...');
   await rerunExpert(expertId);
@@ -510,25 +546,30 @@ function generateSmartSummary(content) {
     const t = line.trim();
     if (t.startsWith('## ')) {
       if (cur) sections.push(cur);
-      cur = { title: t.replace(/^#+\s*/, ''), points: [] };
-    } else if (cur && cur.points.length < 3) {
+      cur = { title: t.replace(/^#+\s*/, ''), point: null };
+    } else if (cur && !cur.point) {
       const cleaned = t.replace(/^[-*]\s*/, '').replace(/\*\*/g, '').replace(/\*/g, '');
       if (cleaned.length > 25) {
-        cur.points.push(cleaned);
+        cur.point = cleaned.length > 250 ? cleaned.substring(0, 247) + '...' : cleaned;
       }
     }
   }
   if (cur) sections.push(cur);
 
   if (sections.length === 0) {
-    return lines.filter(l => l.trim().length > 20).slice(0, 5).map(l => `<div class="summary-item">${escapeHtml(l.trim())}</div>`).join('');
+    const meaningful = lines.filter(l => l.trim().length > 20).slice(0, 5);
+    return meaningful.map(l => {
+      let t = l.trim();
+      if (t.length > 250) t = t.substring(0, 247) + '...';
+      return `<div class="summary-item">${escapeHtml(t)}</div>`;
+    }).join('');
   }
 
   let html = '';
-  for (const s of sections.slice(0, 10)) {
+  for (const s of sections.slice(0, 8)) {
     html += `<div class="summary-section">
       <div class="summary-section-title">${escapeHtml(s.title)}</div>
-      ${s.points.length > 0 ? '<ul>' + s.points.map(p => `<li>${escapeHtml(p)}</li>`).join('') + '</ul>' : ''}
+      ${s.point ? `<p class="summary-point">${escapeHtml(s.point)}</p>` : ''}
     </div>`;
   }
   return html;
@@ -738,6 +779,23 @@ function showExpertTab(btn, tabId) {
   c.querySelectorAll('.gen-tab').forEach(el => el.classList.remove('active'));
   btn.classList.add('active');
   document.getElementById(tabId).style.display = 'block';
+}
+
+async function setPhaseMode(phaseId, mode) {
+  try {
+    const res = await fetch(`/api/council/phase/${phaseId}/mode`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showToast(`${phaseId} set to ${mode}`);
+      await fetchPipeline();
+    } else {
+      showToast(`Error: ${data.error}`);
+    }
+  } catch (e) {
+    showToast(`Error: ${e.message}`);
+  }
 }
 
 // ── Council execution ───────────────────────────────────────
@@ -961,8 +1019,24 @@ function updateDeadlineCountdown() {
   if (el) el.textContent = `${days} days remaining`;
 }
 
+async function reconnectActiveJobs() {
+  try {
+    const res = await fetch('/api/jobs/active');
+    const data = await res.json();
+    if (data.jobs && data.jobs.length > 0) {
+      const job = data.jobs[0];
+      currentJobId = job.job_id;
+      runningExperts = new Set(job.running_experts || []);
+      consoleStatus = { text: `${job.phase_name || ''} ${job.experts_done}/${job.experts_total}`, cls: 'running' };
+      consolePush({ time: new Date().toLocaleTimeString().substring(0, 8), message: `Reconnected to running job (${job.phase_name})`, level: 'info' });
+      streamJobProgress(job.job_id);
+      render();
+    }
+  } catch (e) {}
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-  fetchPipeline();
+  fetchPipeline().then(() => reconnectActiveJobs());
   updateDeadlineCountdown();
   setInterval(updateDeadlineCountdown, 60000);
   document.getElementById('lightbox').addEventListener('click', e => { if (e.target.id === 'lightbox') closeLightbox(); });

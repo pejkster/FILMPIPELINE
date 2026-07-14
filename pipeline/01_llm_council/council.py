@@ -31,9 +31,10 @@ class PhaseConfig:
     id: str
     name: str
     description: str
-    parallel: bool
+    mode: str  # "parallel" or "sequential" (with intra-phase chaining)
     checkpoint: bool
     experts: list[ExpertConfig]
+    previous_phase: str | None = None
 
 
 @dataclass
@@ -60,7 +61,8 @@ class LLMCouncil:
 
     def _parse_phases(self) -> list[PhaseConfig]:
         phases = []
-        for p in self.config["phases"]:
+        phase_list = self.config["phases"]
+        for i, p in enumerate(phase_list):
             experts = [
                 ExpertConfig(
                     id=e["id"],
@@ -70,13 +72,16 @@ class LLMCouncil:
                 )
                 for e in p["experts"]
             ]
+            mode = p.get("mode", "sequential" if not p.get("parallel", False) else "parallel")
+            prev_phase = phase_list[i - 1]["id"] if i > 0 else None
             phases.append(PhaseConfig(
                 id=p["id"],
                 name=p["name"],
                 description=p["description"],
-                parallel=p["parallel"],
+                mode=mode,
                 checkpoint=p["checkpoint"],
                 experts=experts,
+                previous_phase=prev_phase,
             ))
         return phases
 
@@ -106,52 +111,45 @@ class LLMCouncil:
         path = COUNCIL_ROOT / prompt_file
         return path.read_text()
 
-    def _build_context(self, expert: ExpertConfig) -> str:
-        """Build context from prior expert outputs that this expert receives."""
-        if not expert.receives:
+    def _build_phase_context(self, phase: PhaseConfig) -> str:
+        """Build context from all outputs of the previous phase."""
+        if not phase.previous_phase:
             return ""
 
-        context_parts = []
-
-        if "all_research" in expert.receives:
-            research_outputs = [
-                o for o in self.outputs.values() if o.phase_id == "research"
-            ]
-            for o in research_outputs:
-                context_parts.append(
-                    f"## Research Briefing: {o.role}\n\n{o.content}"
-                )
-        elif "vision_document" in expert.receives:
-            vision_outputs = [
-                o for o in self.outputs.values() if o.phase_id == "vision"
-            ]
-            for o in vision_outputs:
-                context_parts.append(
-                    f"## {o.role}'s Contribution\n\n{o.content}"
-                )
-        elif "narrative_document" in expert.receives:
-            narrative_outputs = [
-                o for o in self.outputs.values() if o.phase_id == "narrative"
-            ]
-            for o in narrative_outputs:
-                context_parts.append(
-                    f"## {o.role}'s Contribution\n\n{o.content}"
-                )
-        else:
-            for expert_id in expert.receives:
-                if expert_id in self.outputs:
-                    o = self.outputs[expert_id]
-                    context_parts.append(
-                        f"## {o.role}'s Contribution\n\n{o.content}"
-                    )
-
-        if not context_parts:
+        prev_outputs = [
+            o for o in self.outputs.values()
+            if o.phase_id == phase.previous_phase
+        ]
+        if not prev_outputs:
             return ""
+
+        context_parts = [
+            f"## {o.role}\n\n{o.content}" for o in prev_outputs
+        ]
 
         return (
             "\n\n---\n\n"
-            "# Context from Prior Experts\n\n"
-            "The following contributions have been produced by earlier experts in the council. "
+            f"# Context from {phase.previous_phase.title()} Phase\n\n"
+            "The following outputs were produced by the previous phase. "
+            "Build upon this work — don't repeat it, extend and deepen it.\n\n"
+            + "\n\n---\n\n".join(context_parts)
+        )
+
+    def _build_intra_phase_context(self, expert: ExpertConfig) -> str:
+        """Build context from earlier experts within the same phase (sequential mode only)."""
+        context_parts = []
+        for expert_id in expert.receives:
+            if expert_id in self.outputs:
+                o = self.outputs[expert_id]
+                context_parts.append(
+                    f"## {o.role}'s Contribution\n\n{o.content}"
+                )
+        if not context_parts:
+            return ""
+        return (
+            "\n\n---\n\n"
+            "# Context from Earlier Experts in This Phase\n\n"
+            "The following contributions have been produced by earlier experts in this phase. "
             "Build upon this work — don't repeat it, extend it.\n\n"
             + "\n\n---\n\n".join(context_parts)
         )
@@ -189,12 +187,23 @@ class LLMCouncil:
         results = await client.textInference(request)
         return results[0].text
 
-    async def run_expert(self, expert: ExpertConfig, phase_id: str, parallel: bool = False) -> ExpertOutput:
+    async def run_expert(
+        self, expert: ExpertConfig, phase: PhaseConfig,
+        include_intra_phase: bool = False, parallel: bool = False,
+    ) -> ExpertOutput:
         """Run a single expert — load prompt, build context, call LLM."""
         print(f"  [{expert.role}] Starting...")
 
         system_prompt = self._load_prompt(expert.prompt_file)
-        context = self._build_context(expert)
+
+        # Context from previous phase (always included if available)
+        context = self._build_phase_context(phase)
+
+        # Intra-phase chaining (only in sequential mode)
+        if include_intra_phase and expert.receives:
+            intra = self._build_intra_phase_context(expert)
+            if intra:
+                context = context + intra if context else intra
 
         user_message = (
             "Produce your deliverable now. Follow your instructions precisely. "
@@ -209,7 +218,7 @@ class LLMCouncil:
         output = ExpertOutput(
             expert_id=expert.id,
             role=expert.role,
-            phase_id=phase_id,
+            phase_id=phase.id,
             content=content,
         )
         self.outputs[expert.id] = output
@@ -217,27 +226,27 @@ class LLMCouncil:
         return output
 
     async def run_phase(self, phase: PhaseConfig) -> list[ExpertOutput]:
-        """Run all experts in a phase (parallel or sequential)."""
+        """Run all experts in a phase (parallel or sequential with intra-phase chaining)."""
         print(f"\n{'='*60}")
         print(f"  Phase: {phase.name}")
         print(f"  {phase.description}")
-        print(f"  Experts: {len(phase.experts)} ({'parallel' if phase.parallel else 'sequential'})")
+        print(f"  Experts: {len(phase.experts)} (mode: {phase.mode})")
         print(f"{'='*60}\n")
 
         results = []
 
-        if phase.parallel:
+        if phase.mode == "parallel":
             sem = asyncio.Semaphore(2)
 
             async def run_with_sem(expert):
                 async with sem:
-                    return await self.run_expert(expert, phase.id, parallel=True)
+                    return await self.run_expert(expert, phase, parallel=True)
 
             tasks = [run_with_sem(e) for e in phase.experts]
             results = list(await asyncio.gather(*tasks))
         else:
             for expert in phase.experts:
-                output = await self.run_expert(expert, phase.id)
+                output = await self.run_expert(expert, phase, include_intra_phase=True)
                 results.append(output)
 
         return results

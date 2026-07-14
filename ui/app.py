@@ -346,10 +346,12 @@ async def rerun_expert(expert_id: str, req: RerunExpertRequest):
         receives=expert_config.get("receives", []),
     )
 
+    # Find the matching PhaseConfig object
+    phase_obj = next((p for p in council.phases if p.id == phase_id), None)
+
     try:
         if req.custom_prompt:
-            # Use custom prompt as the system prompt instead of the file
-            context = council._build_context(ec)
+            context = council._build_phase_context(phase_obj) if phase_obj else ""
             user_message = (
                 "Produce your deliverable now. Follow your instructions precisely. "
                 "Be thorough, specific, and vivid. This is for a real film competition "
@@ -363,7 +365,7 @@ async def rerun_expert(expert_id: str, req: RerunExpertRequest):
             )
             council.outputs[ec.id] = output
         else:
-            output = await council.run_expert(ec, phase_id)
+            output = await council.run_expert(ec, phase_obj or phase_id)
 
         _save_expert_result(output.expert_id, output.role, phase_id, output.content)
         return JSONResponse({
@@ -531,11 +533,12 @@ async def get_council_phases():
             else:
                 phase_status = "pending"
 
+        mode = phase.get("mode", "sequential" if not phase.get("parallel", False) else "parallel")
         phases.append({
             "id": phase["id"],
             "name": phase["name"],
             "description": phase["description"],
-            "parallel": phase["parallel"],
+            "mode": mode,
             "checkpoint": phase["checkpoint"],
             "expert_count": len(phase["experts"]),
             "experts": [
@@ -547,6 +550,39 @@ async def get_council_phases():
         })
 
     return JSONResponse({"phases": phases})
+
+
+# ── Council: phase mode toggle ────────────────────────────────
+
+class SetPhaseModeRequest(BaseModel):
+    mode: str  # "parallel" or "sequential"
+
+
+@app.put("/api/council/phase/{phase_id}/mode")
+async def set_phase_mode(phase_id: str, req: SetPhaseModeRequest):
+    """Toggle a phase between parallel and sequential mode."""
+    if req.mode not in ("parallel", "sequential"):
+        return JSONResponse({"error": "Mode must be 'parallel' or 'sequential'"}, status_code=400)
+
+    config_path = PIPELINE_ROOT / "01_llm_council" / "config" / "stage.yaml"
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    found = False
+    for phase in config["phases"]:
+        if phase["id"] == phase_id:
+            phase["mode"] = req.mode
+            phase.pop("parallel", None)
+            found = True
+            break
+
+    if not found:
+        return JSONResponse({"error": "Phase not found"}, status_code=404)
+
+    with open(config_path, "w") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+    return JSONResponse({"ok": True, "mode": req.mode})
 
 
 # ── Council: run with SSE streaming ──────────────────────────
@@ -610,6 +646,51 @@ def _save_expert_result(expert_id: str, role: str, phase_id: str, content: str):
     path.write_text(json.dumps(data, indent=2))
 
 
+SUMMARY_SYSTEM_PROMPT = """You are a concise summarizer. You receive the full output of a domain expert who was asked to produce research or creative work for a film project.
+
+Produce a clear, structured summary with:
+- A one-sentence executive takeaway
+- 4-6 key points as bullet points — each should be a complete, specific insight (not a vague category name)
+- Keep each bullet to 1-2 sentences max
+
+Do NOT truncate or cut off mid-sentence. Every point should be complete and self-contained.
+Write in plain text with markdown bullet points. No headers needed."""
+
+
+async def _summarize_expert_output(expert_id: str):
+    """Run an LLM call to summarize a single expert's output. Saves alongside the result."""
+    import importlib
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+
+    result_path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / f"{expert_id}.json"
+    if not result_path.exists():
+        return None
+
+    data = json.loads(result_path.read_text())
+    council = council_mod.LLMCouncil()
+    summary = await council._call_llm(
+        SUMMARY_SYSTEM_PROMPT,
+        f"Summarize this {data['role']} output:\n\n{data['content']}"
+    )
+
+    data["summary"] = summary
+    data["summary_timestamp"] = datetime.now().isoformat()
+    result_path.write_text(json.dumps(data, indent=2))
+    return summary
+
+
+@app.post("/api/council/expert/{expert_id}/summarize")
+async def summarize_expert(expert_id: str):
+    """Generate an LLM summary for a single expert's output."""
+    try:
+        summary = await _summarize_expert_output(expert_id)
+        if summary is None:
+            return JSONResponse({"error": "No result to summarize"}, status_code=404)
+        return JSONResponse({"ok": True, "summary": summary})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 async def _run_council_background(job_id: str, phase_id: str | None):
     """Run council in background, updating job state for SSE consumers."""
     import importlib
@@ -629,28 +710,29 @@ async def _run_council_background(job_id: str, phase_id: str | None):
             job["experts_done"] = 0
             job["phase_name"] = phase.name
             job["phase_id"] = phase.id
-            _log(job, f"Phase: {phase.name} ({len(phase.experts)} experts, {'parallel' if phase.parallel else 'sequential'})", level="phase")
+            is_parallel = phase.mode == "parallel"
+            _log(job, f"Phase: {phase.name} ({len(phase.experts)} experts, mode: {phase.mode})", level="phase")
+            if phase.previous_phase:
+                prev_count = sum(1 for o in council.outputs.values() if o.phase_id == phase.previous_phase)
+                _log(job, f"Context: {prev_count} outputs from {phase.previous_phase} phase", level="info")
 
-            if phase.parallel:
+            if is_parallel:
                 _log(job, f"Launching {len(phase.experts)} experts in parallel...", level="info")
 
             results = []
-            if phase.parallel:
+            if is_parallel:
                 async def run_and_track(expert):
                     job["running_experts"].append(expert.id)
                     job["current_expert"] = expert.role
-                    ctx_info = f" (with context from {len(expert.receives)} sources)" if expert.receives else " (independent)"
-                    _log(job, f"Starting: {expert.role}{ctx_info}", level="start", expert=expert.id)
+                    _log(job, f"Starting: {expert.role}", level="start", expert=expert.id)
                     try:
-                        output = await council.run_expert(expert, phase.id)
+                        output = await council.run_expert(expert, phase, parallel=True)
                     finally:
                         if expert.id in job["running_experts"]:
                             job["running_experts"].remove(expert.id)
                     job["experts_done"] += 1
                     _save_expert_result(expert.id, expert.role, phase.id, output.content)
-                    preview = output.content[:300].replace('\n', ' ')
                     _log(job, f"Complete: {expert.role} ({len(output.content)} chars)", level="done", expert=expert.id)
-                    _log(job, f"Preview [{expert.role}]: {preview}", level="preview", expert=expert.id)
                     return output
 
                 tasks = [run_and_track(e) for e in phase.experts]
@@ -662,17 +744,24 @@ async def _run_council_background(job_id: str, phase_id: str | None):
                         raise asyncio.CancelledError()
                     job["running_experts"] = [expert.id]
                     job["current_expert"] = expert.role
-                    ctx_info = f" (with context from {len(expert.receives)} sources)" if expert.receives else " (independent)"
-                    _log(job, f"[{idx+1}/{len(phase.experts)}] Starting: {expert.role}{ctx_info}", level="start", expert=expert.id)
+                    _log(job, f"[{idx+1}/{len(phase.experts)}] Starting: {expert.role} (sequential + intra-phase context)", level="start", expert=expert.id)
                     _log(job, f"Calling LLM: {council.llm_config['model']}...", level="info")
-                    output = await council.run_expert(expert, phase.id)
+                    output = await council.run_expert(expert, phase, include_intra_phase=True)
                     job["running_experts"] = []
                     results.append(output)
                     job["experts_done"] += 1
                     _save_expert_result(expert.id, expert.role, phase.id, output.content)
-                    preview = output.content[:300].replace('\n', ' ')
                     _log(job, f"Complete: {expert.role} ({len(output.content)} chars)", level="done", expert=expert.id)
-                    _log(job, f"Preview [{expert.role}]: {preview}", level="preview", expert=expert.id)
+
+            # Auto-summarize all completed experts
+            for expert in phase.experts:
+                _log(job, f"Summarizing {expert.role}...", level="info")
+                try:
+                    await _summarize_expert_output(expert.id)
+                    _log(job, f"Summary ready: {expert.role}", level="done", expert=expert.id)
+                except Exception:
+                    _log(job, f"Summary failed for {expert.role} (non-critical)", level="info")
+
 
             council.save_phase_artifact(phase, results)
             _log(job, f"Artifact saved for phase: {phase.name}", level="save")
@@ -701,6 +790,25 @@ async def _run_council_background(job_id: str, phase_id: str | None):
 def _log(job: dict, msg: str, level: str = "info", expert: str | None = None):
     ts = datetime.now().strftime("%H:%M:%S")
     job["logs"].append({"time": ts, "message": msg, "level": level, "expert": expert})
+
+
+@app.get("/api/jobs/active")
+async def get_active_jobs():
+    """Return any currently running jobs so the frontend can reconnect after refresh."""
+    active = []
+    for job_id, job in jobs.items():
+        if job["status"] in ("starting", "running"):
+            active.append({
+                "job_id": job_id,
+                "status": job["status"],
+                "phase_id": job.get("phase_id"),
+                "phase_name": job.get("phase_name"),
+                "experts_done": job.get("experts_done", 0),
+                "experts_total": job.get("experts_total", 0),
+                "running_experts": job.get("running_experts", []),
+                "current_expert": job.get("current_expert"),
+            })
+    return JSONResponse({"jobs": active})
 
 
 @app.get("/api/jobs/{job_id}")

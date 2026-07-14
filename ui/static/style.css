@@ -449,6 +449,48 @@ body {
 .phase-title h4 { font-size: 0.9rem; font-weight: 600; margin: 0; }
 .phase-title p { font-size: 0.7rem; color: var(--text-muted); margin: 0.15rem 0 0; }
 
+.phase-mode-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.65rem;
+  padding-left: 1.85rem;
+}
+
+.phase-mode-label {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-right: 0.2rem;
+}
+
+.phase-mode-btn {
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.phase-mode-btn:hover { color: var(--text); border-color: #3a3d4a; }
+
+.phase-mode-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.phase-mode-desc {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-left: 0.5rem;
+}
+
 .phase-experts {
   display: flex;
   flex-wrap: wrap;
@@ -1204,6 +1246,34 @@ body {
   line-height: 1.5;
   list-style: disc;
   margin-bottom: 0.15rem;
+}
+
+.progress-summary-llm {
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  line-height: 1.6;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.progress-summary-llm strong { color: var(--text); }
+
+.progress-summary-actions {
+  margin-top: 0.5rem;
+}
+
+.modal-summary-llm {
+  font-size: 0.85rem;
+  line-height: 1.7;
+}
+
+.modal-summary-llm strong { color: var(--text); }
+
+.summary-point {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 0.15rem 0 0;
 }
 
 .summary-item {
