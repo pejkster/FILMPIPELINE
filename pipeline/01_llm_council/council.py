@@ -80,6 +80,28 @@ class LLMCouncil:
             ))
         return phases
 
+    def _load_prior_outputs(self):
+        """Load saved expert results from disk so context chaining works across separate runs."""
+        results_dir = COUNCIL_ROOT / "outputs" / "experts"
+        if not results_dir.exists():
+            return
+        for path in results_dir.glob("*.json"):
+            if path.name.startswith("_"):
+                continue
+            try:
+                data = json.loads(path.read_text())
+                eid = data["expert_id"]
+                if eid not in self.outputs:
+                    self.outputs[eid] = ExpertOutput(
+                        expert_id=eid,
+                        role=data["role"],
+                        phase_id=data["phase_id"],
+                        content=data["content"],
+                        timestamp=datetime.fromisoformat(data["timestamp"]),
+                    )
+            except (json.JSONDecodeError, KeyError):
+                continue
+
     def _load_prompt(self, prompt_file: str) -> str:
         path = COUNCIL_ROOT / prompt_file
         return path.read_text()
@@ -265,6 +287,7 @@ class LLMCouncil:
 
     async def run_council(self, phase_id: str | None = None) -> list["Artifact"]:
         """Run the full council or a specific phase."""
+        self._load_prior_outputs()
         artifacts = []
 
         phases_to_run = self.phases

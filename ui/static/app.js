@@ -195,6 +195,7 @@ function renderCouncilPanel() {
         </div>
         <div class="phase-actions">
           <button class="btn btn-primary" onclick="event.stopPropagation(); runCouncilPhase('${phase.id}')" id="btn-phase-${phase.id}">${phase.status === 'idle' ? 'Run Phase' : 'Re-run'}</button>
+          ${currentJobId ? `<button class="btn btn-sm btn-danger-outline" onclick="event.stopPropagation(); stopGeneration()">Stop</button>` : ''}
           ${phase.status === 'pending' && phase.checkpoint ? `<button class="btn btn-approve btn-sm" onclick="event.stopPropagation(); approvePhase('${phase.id}')">Approve</button>` : ''}
         </div>
       </div>`;
@@ -205,6 +206,8 @@ function renderCouncilPanel() {
 
 // ── Progress tab ────────────────────────────────────────────
 
+const collapsedPhases = new Set();
+
 function renderProgressPanel(stage) {
   if (stage.stage !== 1 || !councilData) return '<div class="empty-state"><p>Progress tracking for LLM Council.</p></div>';
 
@@ -213,58 +216,118 @@ function renderProgressPanel(stage) {
 
   let html = '<div class="progress-panel">';
 
-  // Top bar with clear button
   html += `<div class="progress-top-bar">
     <span class="progress-overall">${doneExperts}/${totalExperts} experts complete</span>
     <div class="progress-top-actions">
-      ${doneExperts > 0 ? `<button class="btn btn-sm btn-danger-outline" onclick="clearAllResults()">Clear All Results</button>` : ''}
+      ${doneExperts > 0 ? `<button class="btn btn-sm btn-danger-outline" onclick="clearAllResults()">Clear All</button>` : ''}
     </div>
   </div>`;
 
   councilData.phases.forEach(phase => {
     const phaseDone = phase.experts.filter(e => !!expertResults[e.id]).length;
-    html += `<div class="progress-phase">
-      <div class="progress-phase-header">
-        <h4>${phase.name}</h4>
-        <span class="progress-count">${phaseDone}/${phase.experts.length}</span>
-      </div>
-      <div class="progress-experts">`;
+    const collapsed = collapsedPhases.has(phase.id);
+    const chevron = collapsed ? '▸' : '▾';
 
-    phase.experts.forEach(e => {
-      const result = expertResults[e.id];
-      const isRunning = runningExperts.has(e.id);
+    html += `<div class="progress-phase ${collapsed ? 'collapsed' : ''}">
+      <div class="progress-phase-header" onclick="togglePhaseCollapse('${phase.id}')">
+        <div class="progress-phase-left">
+          <span class="phase-chevron">${chevron}</span>
+          <h4>${phase.name}</h4>
+          <span class="progress-count">${phaseDone}/${phase.experts.length}</span>
+        </div>
+        <div class="progress-phase-actions" onclick="event.stopPropagation()">
+          ${phaseDone > 0 ? `<button class="btn btn-sm btn-danger-outline" onclick="clearPhaseResults('${phase.id}')" title="Clear phase results">Clear</button>` : ''}
+        </div>
+      </div>`;
 
-      if (result) {
-        const summary = extractSummary(result.content);
-        html += `
-          <div class="progress-expert done" onclick="openExpertModal('${e.id}')">
-            <div class="progress-expert-header">
-              <span class="progress-expert-name">${e.role}</span>
-              <span class="progress-expert-meta">${result.content.length} chars · ${new Date(result.timestamp).toLocaleTimeString()}</span>
-            </div>
-            <ul class="progress-summary">${summary}</ul>
-          </div>`;
-      } else if (isRunning) {
-        html += `
-          <div class="progress-expert is-running">
-            <div class="progress-expert-header">
-              <span class="progress-expert-name">${e.role}</span>
-              <span class="progress-expert-meta">generating...</span>
-            </div>
-          </div>`;
-      } else {
-        html += `
-          <div class="progress-expert queued">
-            <div class="progress-expert-header">
-              <span class="progress-expert-name">${e.role}</span>
-              <span class="progress-expert-meta">queued</span>
-            </div>
-          </div>`;
-      }
-    });
-    html += '</div></div>';
+    if (!collapsed) {
+      html += '<div class="progress-experts">';
+      phase.experts.forEach(e => {
+        const result = expertResults[e.id];
+        const isRunning = runningExperts.has(e.id);
+
+        if (result) {
+          const summary = extractSummary(result.content);
+          html += `
+            <div class="progress-expert done">
+              <div class="progress-expert-header">
+                <span class="progress-expert-name" onclick="openExpertModal('${e.id}')">${e.role}</span>
+                <div class="progress-expert-actions">
+                  <span class="progress-expert-meta">${result.content.length} chars</span>
+                  <button class="btn-icon" onclick="rerunExpert('${e.id}')" title="Rerun">↻</button>
+                  <button class="btn-icon btn-icon-danger" onclick="deleteExpertResult('${e.id}')" title="Delete">✕</button>
+                </div>
+              </div>
+              <ul class="progress-summary" onclick="openExpertModal('${e.id}')">${summary}</ul>
+            </div>`;
+        } else if (isRunning) {
+          html += `
+            <div class="progress-expert is-running">
+              <div class="progress-expert-header">
+                <span class="progress-expert-name">${e.role}</span>
+                <span class="progress-expert-meta">generating...</span>
+              </div>
+            </div>`;
+        } else {
+          html += `
+            <div class="progress-expert queued">
+              <div class="progress-expert-header">
+                <span class="progress-expert-name">${e.role}</span>
+                <div class="progress-expert-actions">
+                  <span class="progress-expert-meta">queued</span>
+                  <button class="btn-icon" onclick="rerunExpert('${e.id}')" title="Run this expert">▶</button>
+                </div>
+              </div>
+            </div>`;
+        }
+      });
+      html += '</div>';
+    }
+    html += '</div>';
   });
   return html + '</div>';
+}
+
+function togglePhaseCollapse(phaseId) {
+  if (collapsedPhases.has(phaseId)) collapsedPhases.delete(phaseId);
+  else collapsedPhases.add(phaseId);
+  render();
+}
+
+async function clearPhaseResults(phaseId) {
+  if (!confirm(`Clear all results for this phase?`)) return;
+  await fetch(`/api/council/results/clear/${phaseId}`, { method: 'POST' });
+  showToast('Phase results cleared');
+  await fetchPipeline();
+}
+
+async function deleteExpertResult(expertId) {
+  await fetch(`/api/council/results/${expertId}`, { method: 'DELETE' });
+  showToast('Expert result deleted');
+  await fetchPipeline();
+}
+
+async function rerunExpert(expertId, customPrompt = null) {
+  showToast('Rerunning expert...');
+  try {
+    const body = customPrompt ? { custom_prompt: customPrompt } : {};
+    const res = await fetch(`/api/council/expert/${expertId}/rerun`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showToast('Expert rerun complete');
+      await fetchExpertResults();
+      render();
+      if (document.getElementById('expert-modal').classList.contains('visible')) {
+        openExpertModal(expertId);
+      }
+    } else {
+      showToast(`Error: ${data.error}`);
+    }
+  } catch (e) {
+    showToast(`Error: ${e.message}`);
+  }
 }
 
 function extractSummary(content) {
@@ -308,41 +371,132 @@ async function openExpertModal(expertId) {
   let meta = {};
   try { const res = await fetch(`/api/council/expert/${expertId}`); meta = await res.json(); } catch(e) {}
 
+  let chatHistory = [];
+  try { const res = await fetch(`/api/council/expert/${expertId}/chat`); const d = await res.json(); chatHistory = d.history || []; } catch(e) {}
+
   const summary = generateSmartSummary(result.content);
   const modal = document.getElementById('expert-modal');
   const body = document.getElementById('expert-modal-body');
 
+  const chatHtml = chatHistory.map(c => `
+    <div class="chat-msg chat-user"><div class="chat-bubble">${escapeHtml(c.user)}</div><span class="chat-time">${new Date(c.timestamp).toLocaleTimeString()}</span></div>
+    <div class="chat-msg chat-assistant"><div class="chat-bubble">${renderMarkdown(c.assistant)}</div></div>
+  `).join('');
+
   body.innerHTML = `
-    <div class="modal-header-bar">
-      <div>
-        <h2 class="modal-title">${result.role}</h2>
-        <p class="modal-subtitle">Phase: ${meta.phase_name || result.phase_id} · ${result.content.length} chars · ${new Date(result.timestamp).toLocaleString()}</p>
+    <div class="modal-main">
+      <div class="modal-header-bar">
+        <div>
+          <h2 class="modal-title">${result.role}</h2>
+          <p class="modal-subtitle">Phase: ${meta.phase_name || result.phase_id} · ${result.content.length} chars · ${new Date(result.timestamp).toLocaleString()}</p>
+        </div>
+        <div class="modal-header-actions">
+          <button class="btn btn-sm" onclick="rerunExpertFromModal('${expertId}')" title="Rerun with current prompt">↻ Rerun</button>
+          <button class="btn btn-sm" onclick="closeExpertModal()">Close</button>
+        </div>
       </div>
-      <button class="btn btn-sm" onclick="closeExpertModal()">Close</button>
-    </div>
-    <div class="modal-tabs">
-      <button class="gen-tab active" onclick="showModalTab(this, 'modal-summary')">Summary</button>
-      <button class="gen-tab" onclick="showModalTab(this, 'modal-full')">Full Output</button>
-    </div>
-    <div id="modal-summary" class="modal-content-area">
-      <div class="modal-summary-card">
-        <h4>Key Points & Takeaways</h4>
-        <div class="modal-summary-list">${summary}</div>
+      <div class="modal-tabs">
+        <button class="gen-tab active" onclick="showModalTab(this, 'modal-summary')">Summary</button>
+        <button class="gen-tab" onclick="showModalTab(this, 'modal-full')">Full Output</button>
+        <button class="gen-tab" onclick="showModalTab(this, 'modal-rerun')">Rerun with Prompt</button>
+      </div>
+      <div id="modal-summary" class="modal-content-area">
+        <div class="modal-summary-card">
+          <h4>Key Points & Takeaways</h4>
+          <div class="modal-summary-list">${summary}</div>
+        </div>
+      </div>
+      <div id="modal-full" class="modal-content-area" style="display:none;">
+        <div class="modal-full-output">${renderMarkdown(result.content)}</div>
+      </div>
+      <div id="modal-rerun" class="modal-content-area" style="display:none;">
+        <div class="rerun-container">
+          <p class="rerun-desc">Write a custom prompt to rerun this expert with different instructions. Leave empty to rerun with the original prompt.</p>
+          <textarea id="rerun-prompt-${expertId}" class="rerun-prompt" rows="8" placeholder="Custom system prompt (optional)...">${escapeHtml(meta.prompt || '')}</textarea>
+          <div class="rerun-actions">
+            <button class="btn btn-primary" onclick="rerunExpertCustom('${expertId}')" id="btn-rerun-${expertId}">Rerun Expert</button>
+          </div>
+        </div>
       </div>
     </div>
-    <div id="modal-full" class="modal-content-area" style="display:none;">
-      <div class="modal-full-output">${renderMarkdown(result.content)}</div>
+    <div class="modal-chat-side">
+      <div class="modal-chat-side-header">Chat with ${escapeHtml(result.role)}</div>
+      <div class="chat-messages" id="chat-messages-${expertId}">
+        ${chatHtml || '<div class="chat-empty">Ask questions, request clarifications, or add context.</div>'}
+      </div>
+      <div class="chat-input-bar">
+        <textarea id="chat-input-${expertId}" class="chat-input" rows="2" placeholder="Ask a question..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendExpertChat('${expertId}')}"></textarea>
+        <button class="btn btn-primary btn-sm" onclick="sendExpertChat('${expertId}')" id="btn-chat-${expertId}">Send</button>
+      </div>
     </div>`;
 
   modal.classList.add('visible');
+  modal.dataset.expertId = expertId;
+}
+
+async function sendExpertChat(expertId) {
+  const input = document.getElementById(`chat-input-${expertId}`);
+  const btn = document.getElementById(`btn-chat-${expertId}`);
+  const msg = input.value.trim();
+  if (!msg) return;
+
+  btn.disabled = true; btn.textContent = 'Sending...';
+  const messagesEl = document.getElementById(`chat-messages-${expertId}`);
+  const emptyEl = messagesEl.querySelector('.chat-empty');
+  if (emptyEl) emptyEl.remove();
+
+  messagesEl.innerHTML += `<div class="chat-msg chat-user"><div class="chat-bubble">${escapeHtml(msg)}</div></div>
+    <div class="chat-msg chat-assistant chat-loading"><div class="chat-bubble">Thinking...</div></div>`;
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  input.value = '';
+
+  try {
+    const res = await fetch(`/api/council/expert/${expertId}/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: msg })
+    });
+    const data = await res.json();
+    const loadingEl = messagesEl.querySelector('.chat-loading');
+    if (loadingEl) loadingEl.remove();
+
+    if (data.ok) {
+      messagesEl.innerHTML += `<div class="chat-msg chat-assistant"><div class="chat-bubble">${renderMarkdown(data.response)}</div></div>`;
+    } else {
+      messagesEl.innerHTML += `<div class="chat-msg chat-error"><div class="chat-bubble">Error: ${escapeHtml(data.error)}</div></div>`;
+    }
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  } catch (e) {
+    const loadingEl = messagesEl.querySelector('.chat-loading');
+    if (loadingEl) loadingEl.remove();
+    messagesEl.innerHTML += `<div class="chat-msg chat-error"><div class="chat-bubble">Error: ${escapeHtml(e.message)}</div></div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Send';
+  }
+}
+
+async function rerunExpertFromModal(expertId) {
+  showToast('Rerunning expert...');
+  await rerunExpert(expertId);
+}
+
+async function rerunExpertCustom(expertId) {
+  const textarea = document.getElementById(`rerun-prompt-${expertId}`);
+  const btn = document.getElementById(`btn-rerun-${expertId}`);
+  const customPrompt = textarea.value.trim() || null;
+
+  btn.disabled = true; btn.textContent = 'Running...';
+  try {
+    await rerunExpert(expertId, customPrompt);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Rerun Expert';
+  }
 }
 
 function closeExpertModal() { document.getElementById('expert-modal').classList.remove('visible'); }
 
 function showModalTab(btn, tabId) {
-  const modal = document.getElementById('expert-modal-body');
-  modal.querySelectorAll('.modal-content-area').forEach(el => el.style.display = 'none');
-  modal.querySelectorAll('.gen-tab').forEach(el => el.classList.remove('active'));
+  const main = document.querySelector('.modal-main');
+  main.querySelectorAll('.modal-content-area').forEach(el => el.style.display = 'none');
+  main.querySelectorAll('.gen-tab').forEach(el => el.classList.remove('active'));
   btn.classList.add('active');
   document.getElementById(tabId).style.display = 'block';
 }
@@ -605,6 +759,16 @@ async function runCouncilPhase(phaseId) {
   }
 }
 
+async function stopGeneration() {
+  if (!currentJobId) return;
+  try {
+    await fetch(`/api/jobs/${currentJobId}/cancel`, { method: 'POST' });
+    showToast('Stopping generation...');
+  } catch (e) {
+    showToast(`Error: ${e.message}`);
+  }
+}
+
 function streamJobProgress(jobId) {
   if (activeEvtSource) activeEvtSource.close();
   const evtSource = new EventSource(`/api/jobs/${jobId}/stream`);
@@ -630,12 +794,14 @@ function streamJobProgress(jobId) {
     }
     if (data.type === 'done') {
       evtSource.close(); activeEvtSource = null; currentJobId = null; runningExperts.clear();
-      consoleStatus = data.status === 'complete' ? { text: 'Complete', cls: 'done' } : { text: 'Error', cls: 'error' };
+      const statusMap = { complete: { text: 'Complete', cls: 'done' }, cancelled: { text: 'Stopped', cls: 'error' } };
+      consoleStatus = statusMap[data.status] || { text: 'Error', cls: 'error' };
       const s = document.getElementById('console-status');
       if (s) { s.textContent = consoleStatus.text; s.className = `console-status ${consoleStatus.cls}`; }
       if (data.error) consolePush({ time: '', message: `Error: ${data.error}`, level: 'error' });
       fetchPipeline();
-      showToast(data.status === 'complete' ? 'Phase complete' : `Error: ${data.error}`);
+      const toastMsg = { complete: 'Phase complete', cancelled: 'Generation stopped' };
+      showToast(toastMsg[data.status] || `Error: ${data.error}`);
     }
   };
   evtSource.onerror = () => {

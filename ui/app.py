@@ -279,6 +279,175 @@ async def clear_council_results():
     return JSONResponse({"ok": True})
 
 
+# ── Council: clear by phase / expert ─────────────────────────
+
+@app.delete("/api/council/results/{expert_id}")
+async def delete_expert_result(expert_id: str):
+    """Delete a single expert's result."""
+    path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / f"{expert_id}.json"
+    if not path.exists():
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    path.unlink()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/council/results/clear/{phase_id}")
+async def clear_phase_results(phase_id: str):
+    """Clear all expert results for a specific phase."""
+    results_dir = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts"
+    if not results_dir.exists():
+        return JSONResponse({"ok": True})
+    cleared = 0
+    for path in results_dir.glob("*.json"):
+        if path.name.startswith("_"):
+            continue
+        try:
+            data = json.loads(path.read_text())
+            if data.get("phase_id") == phase_id:
+                path.unlink()
+                cleared += 1
+        except (json.JSONDecodeError, KeyError):
+            continue
+    return JSONResponse({"ok": True, "cleared": cleared})
+
+
+# ── Council: rerun single expert ─────────────────────────────
+
+class RerunExpertRequest(BaseModel):
+    custom_prompt: str | None = None
+
+
+@app.post("/api/council/expert/{expert_id}/rerun")
+async def rerun_expert(expert_id: str, req: RerunExpertRequest):
+    """Rerun a single expert, optionally with a custom prompt override."""
+    import importlib
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+
+    config = load_stage_config(1)
+    expert_config = None
+    phase_id = None
+    for phase in config["phases"]:
+        for expert in phase["experts"]:
+            if expert["id"] == expert_id:
+                expert_config = expert
+                phase_id = phase["id"]
+                break
+
+    if not expert_config:
+        return JSONResponse({"error": "Expert not found"}, status_code=404)
+
+    council = council_mod.LLMCouncil()
+    council._load_prior_outputs()
+
+    ec = council_mod.ExpertConfig(
+        id=expert_config["id"],
+        role=expert_config["role"],
+        prompt_file=expert_config["prompt_file"],
+        receives=expert_config.get("receives", []),
+    )
+
+    try:
+        if req.custom_prompt:
+            # Use custom prompt as the system prompt instead of the file
+            context = council._build_context(ec)
+            user_message = (
+                "Produce your deliverable now. Follow your instructions precisely. "
+                "Be thorough, specific, and vivid. This is for a real film competition "
+                "with a $3.5 million prize — bring your best work."
+            )
+            if context:
+                user_message = context + "\n\n---\n\n" + user_message
+            content = await council._call_llm(req.custom_prompt, user_message)
+            output = council_mod.ExpertOutput(
+                expert_id=ec.id, role=ec.role, phase_id=phase_id, content=content
+            )
+            council.outputs[ec.id] = output
+        else:
+            output = await council.run_expert(ec, phase_id)
+
+        _save_expert_result(output.expert_id, output.role, phase_id, output.content)
+        return JSONResponse({
+            "ok": True,
+            "result": {
+                "expert_id": output.expert_id,
+                "role": output.role,
+                "phase_id": phase_id,
+                "content": output.content,
+                "timestamp": output.timestamp.isoformat(),
+            }
+        })
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+# ── Council: chat with expert ────────────────────────────────
+
+class ChatExpertRequest(BaseModel):
+    message: str
+
+
+@app.post("/api/council/expert/{expert_id}/chat")
+async def chat_with_expert(expert_id: str, req: ChatExpertRequest):
+    """Send a follow-up message to an expert, using their output as context."""
+    import importlib
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+
+    # Load existing result
+    result_path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / f"{expert_id}.json"
+    if not result_path.exists():
+        return JSONResponse({"error": "No existing output to chat with"}, status_code=400)
+
+    result_data = json.loads(result_path.read_text())
+
+    # Load the expert's original prompt as system prompt
+    config = load_stage_config(1)
+    system_prompt = ""
+    for phase in config["phases"]:
+        for expert in phase["experts"]:
+            if expert["id"] == expert_id:
+                prompt_path = PIPELINE_ROOT / "01_llm_council" / expert["prompt_file"]
+                if prompt_path.exists():
+                    system_prompt = prompt_path.read_text()
+                break
+
+    # Load chat history
+    chat_path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / f"{expert_id}_chat.json"
+    chat_history = []
+    if chat_path.exists():
+        chat_history = json.loads(chat_path.read_text())
+
+    # Build user message with original output as context
+    user_message = (
+        f"Here is your previous output:\n\n{result_data['content']}\n\n---\n\n"
+        f"The user has a follow-up question or request:\n\n{req.message}"
+    )
+
+    council = council_mod.LLMCouncil()
+    try:
+        response = await council._call_llm(system_prompt, user_message)
+
+        chat_entry = {
+            "user": req.message,
+            "assistant": response,
+            "timestamp": datetime.now().isoformat(),
+        }
+        chat_history.append(chat_entry)
+        chat_path.write_text(json.dumps(chat_history, indent=2))
+
+        return JSONResponse({"ok": True, "response": response, "history": chat_history})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/council/expert/{expert_id}/chat")
+async def get_expert_chat(expert_id: str):
+    """Get chat history for an expert."""
+    chat_path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / f"{expert_id}_chat.json"
+    if not chat_path.exists():
+        return JSONResponse({"history": []})
+    return JSONResponse({"history": json.loads(chat_path.read_text())})
+
+
 # ── Council: synthesize results ───────────────────────────────
 
 @app.post("/api/council/synthesize")
@@ -402,9 +571,28 @@ async def run_council_start(req: RunCouncilRequest):
         "error": None,
     }
 
-    asyncio.create_task(_run_council_background(job_id, req.phase_id))
+    task = asyncio.create_task(_run_council_background(job_id, req.phase_id))
+    jobs[job_id]["_task"] = task
 
     return JSONResponse({"ok": True, "job_id": job_id})
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str):
+    """Cancel a running council job."""
+    if job_id not in jobs:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    job = jobs[job_id]
+    if job["status"] not in ("starting", "running"):
+        return JSONResponse({"error": "Job is not running"}, status_code=400)
+    job["cancelled"] = True
+    task = job.get("_task")
+    if task and not task.done():
+        task.cancel()
+    job["status"] = "cancelled"
+    job["running_experts"] = []
+    _log(job, "Generation cancelled by user", level="error")
+    return JSONResponse({"ok": True})
 
 
 def _save_expert_result(expert_id: str, role: str, phase_id: str, content: str):
@@ -469,6 +657,9 @@ async def _run_council_background(job_id: str, phase_id: str | None):
                 results = list(await asyncio.gather(*tasks))
             else:
                 for idx, expert in enumerate(phase.experts):
+                    if job.get("cancelled"):
+                        _log(job, "Cancelled — stopping before next expert", level="error")
+                        raise asyncio.CancelledError()
                     job["running_experts"] = [expert.id]
                     job["current_expert"] = expert.role
                     ctx_info = f" (with context from {len(expert.receives)} sources)" if expert.receives else " (independent)"
@@ -494,6 +685,11 @@ async def _run_council_background(job_id: str, phase_id: str | None):
         job["current_expert"] = None
         _log(job, "All done — results saved to artifacts", level="done")
 
+    except asyncio.CancelledError:
+        job["status"] = "cancelled"
+        job["running_experts"] = []
+        job["current_expert"] = None
+        _log(job, "Generation stopped", level="error")
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
@@ -547,7 +743,7 @@ async def stream_job(job_id: str):
                     yield f"data: {data}\n\n"
                 last_log_count = len(current_logs)
 
-            if job["status"] in ("complete", "error"):
+            if job["status"] in ("complete", "error", "cancelled"):
                 data = json.dumps({
                     "type": "done",
                     "status": job["status"],
