@@ -26,7 +26,8 @@ Artifacts flow forward through checkpoints (`checkpoints/`) where human review g
 
 ## Commands
 ```bash
-pip install -r requirements.txt    # install dependencies
-python -m pipeline.run             # run full pipeline
-python -m pipeline.run --stage 1   # run single stage
+pip install -r requirements.txt                        # install dependencies
+python -m pipeline.run                                 # run full pipeline
+python -m pipeline.run --stage 1                       # run single stage
+uvicorn ui.app:app --reload --port 8000                # start dashboard UI
 ```

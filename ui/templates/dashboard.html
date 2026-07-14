@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Metaninoa — Pipeline Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="header">
+    <h1>Metaninoa <span>Pipeline</span></h1>
+    <div class="header-meta">
+      <span id="countdown"></span>
+      <span class="deadline">Deadline: Aug 14, 2026</span>
+    </div>
+  </div>
+
+  <div class="container">
+    <div id="pipeline-flow" class="pipeline-flow"></div>
+    <div id="detail-panel" class="detail-panel">
+      <div class="empty-state">
+        <div class="empty-icon">←</div>
+        <p>Select a stage above to view its artifacts and configuration</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="lightbox" class="lightbox">
+    <img id="lightbox-img" src="" alt="Preview">
+  </div>
+  <div id="toast" class="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
