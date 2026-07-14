@@ -1,0 +1,47 @@
+stage: 3
+name: "Production"
+description: "Shot generation, composition, audio, and final video assembly"
+
+inputs_from: [1, 2]
+
+video:
+  duration_seconds: 180  # 3-minute trailer
+  fps: 24
+  resolution: "1920x1080"
+  format: "mp4"
+  codec: "h264"
+
+shots:
+  generation:
+    tool: "runware"  # primary image generation
+    upscale: true
+    upscale_factor: 2
+  animation:
+    method: "ken_burns"  # camera movement on stills
+    options: ["pan", "zoom", "parallax"]
+
+audio:
+  music:
+    source: "suno"  # or udio, stock
+    style: "cinematic orchestral, hopeful, building"
+  voice:
+    narration: true
+    tts_model: "eleven_labs"
+  sound_design:
+    ambient: true
+    transitions: true
+
+composition:
+  tool: "ffmpeg"
+  transitions: ["crossfade", "cut", "whip_pan"]
+  color_grading: true
+
+outputs:
+  - type: shot_list
+    description: "Ordered shot list with timing and descriptions"
+  - type: composition
+    description: "Final composed video with audio"
+
+checkpoint:
+  required: true
+  reviewers: ["nejc", "dirk"]

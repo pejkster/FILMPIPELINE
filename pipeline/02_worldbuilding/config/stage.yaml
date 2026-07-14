@@ -1,0 +1,35 @@
+stage: 2
+name: "Worldbuilding & Characters"
+description: "Visual consistency, character design, and environment specification"
+
+inputs_from: [1]
+
+style:
+  # Global visual direction — refined during production
+  aesthetic: "grounded sci-fi, warm palette, organic architecture"
+  references: []  # paths to reference images added during development
+  color_palette: []  # hex values defined during style guide creation
+
+characters:
+  generation:
+    tool: "runware"  # or comfyui, flux, etc.
+    consistency_method: "reference_sheet"  # generate character ref sheets first
+    views: ["front", "three_quarter", "profile"]
+
+environments:
+  generation:
+    tool: "runware"
+    method: "tile_and_compose"  # modular environment building
+    layers: ["background", "midground", "foreground"]
+
+outputs:
+  - type: style_guide
+    description: "Visual style bible — colors, textures, lighting"
+  - type: character_profile
+    description: "Character reference sheets with consistent design"
+  - type: environment_spec
+    description: "Environment layouts and mood boards"
+
+checkpoint:
+  required: true
+  reviewers: ["nejc", "dirk"]

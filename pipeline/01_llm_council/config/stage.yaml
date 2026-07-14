@@ -1,0 +1,38 @@
+stage: 1
+name: "LLM Council"
+description: "Narrative research, vision, and story generation through collaborative LLM debate"
+
+council:
+  # Each council member has a role and perspective
+  members:
+    - role: futurist
+      perspective: "Technology trends, scientific plausibility, timeline accuracy"
+      model: "claude-sonnet-4-6"
+    - role: storyteller
+      perspective: "Narrative structure, emotional arc, character motivation"
+      model: "claude-sonnet-4-6"
+    - role: world_architect
+      perspective: "Societal systems, economics, governance, culture"
+      model: "claude-sonnet-4-6"
+    - role: visual_director
+      perspective: "Cinematic language, visual metaphors, shot composition"
+      model: "claude-sonnet-4-6"
+    - role: lore_keeper
+      perspective: "Disorder universe canon, Metaninoa chapter consistency"
+      model: "claude-sonnet-4-6"
+
+  debate:
+    rounds: 3
+    consensus_threshold: 0.8
+
+outputs:
+  - type: narrative
+    description: "Core story arc and thematic framework"
+  - type: scene_breakdown
+    description: "Scene-by-scene breakdown with timing for 3-minute trailer"
+  - type: treatment
+    description: "12-page film treatment document"
+
+checkpoint:
+  required: true
+  reviewers: ["nejc", "dirk"]

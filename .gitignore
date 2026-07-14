@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Generated outputs (large files, not tracked)
+pipeline/01_llm_council/outputs/*
+pipeline/02_worldbuilding/outputs/*
+pipeline/02_worldbuilding/assets/characters/*
+pipeline/02_worldbuilding/assets/environments/*
+pipeline/03_production/outputs/*
+pipeline/03_production/shots/*
+pipeline/03_production/audio/*
+pipeline/03_production/compositions/*
+
+# Keep output directories
+!pipeline/*/outputs/.gitkeep
+!pipeline/02_worldbuilding/assets/**/.gitkeep
+!pipeline/03_production/shots/.gitkeep
+!pipeline/03_production/audio/.gitkeep
+!pipeline/03_production/compositions/.gitkeep
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
