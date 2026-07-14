@@ -143,9 +143,14 @@ class LLMCouncil:
             await self._runware.connect()
         return self._runware
 
-    async def _call_llm(self, system_prompt: str, user_message: str) -> str:
+    async def _call_llm(self, system_prompt: str, user_message: str, own_connection: bool = False) -> str:
         """Call Claude via Runware's text inference API."""
-        client = await self._get_runware()
+        if own_connection:
+            api_key = os.getenv("RUNWARE_API_KEY")
+            client = Runware(api_key=api_key)
+            await client.connect()
+        else:
+            client = await self._get_runware()
 
         request = ITextInference(
             model=self.llm_config["model"],
@@ -162,7 +167,7 @@ class LLMCouncil:
         results = await client.textInference(request)
         return results[0].text
 
-    async def run_expert(self, expert: ExpertConfig, phase_id: str) -> ExpertOutput:
+    async def run_expert(self, expert: ExpertConfig, phase_id: str, parallel: bool = False) -> ExpertOutput:
         """Run a single expert — load prompt, build context, call LLM."""
         print(f"  [{expert.role}] Starting...")
 
@@ -177,7 +182,7 @@ class LLMCouncil:
         if context:
             user_message = context + "\n\n---\n\n" + user_message
 
-        content = await self._call_llm(system_prompt, user_message)
+        content = await self._call_llm(system_prompt, user_message, own_connection=parallel)
 
         output = ExpertOutput(
             expert_id=expert.id,
@@ -200,11 +205,14 @@ class LLMCouncil:
         results = []
 
         if phase.parallel:
-            tasks = [
-                self.run_expert(expert, phase.id) for expert in phase.experts
-            ]
-            results = await asyncio.gather(*tasks)
-            results = list(results)
+            sem = asyncio.Semaphore(2)
+
+            async def run_with_sem(expert):
+                async with sem:
+                    return await self.run_expert(expert, phase.id, parallel=True)
+
+            tasks = [run_with_sem(e) for e in phase.experts]
+            results = list(await asyncio.gather(*tasks))
         else:
             for expert in phase.experts:
                 output = await self.run_expert(expert, phase.id)

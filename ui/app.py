@@ -217,6 +217,128 @@ async def get_expert_detail(expert_id: str):
     return JSONResponse({"error": "Expert not found"}, status_code=404)
 
 
+# ── Council: expert results (individual files) ────────────────
+
+@app.get("/api/council/results")
+async def get_council_results():
+    """Get all individual expert results for the progress view."""
+    results_dir = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts"
+    results = []
+    if results_dir.exists():
+        for path in sorted(results_dir.glob("*.json")):
+            try:
+                data = json.loads(path.read_text())
+                results.append(data)
+            except (json.JSONDecodeError, KeyError):
+                continue
+    return JSONResponse({"results": results})
+
+
+@app.get("/api/council/results/{expert_id}")
+async def get_expert_result(expert_id: str):
+    """Get a single expert's result."""
+    path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / f"{expert_id}.json"
+    if not path.exists():
+        return JSONResponse({"error": "No result for this expert"}, status_code=404)
+    data = json.loads(path.read_text())
+    return JSONResponse(data)
+
+
+# ── Council: prompt editing ───────────────────────────────────
+
+class SavePromptRequest(BaseModel):
+    content: str
+
+
+@app.put("/api/council/expert/{expert_id}/prompt")
+async def save_expert_prompt(expert_id: str, req: SavePromptRequest):
+    """Save edited prompt for an expert."""
+    config = load_stage_config(1)
+    for phase in config["phases"]:
+        for expert in phase["experts"]:
+            if expert["id"] == expert_id:
+                prompt_path = PIPELINE_ROOT / "01_llm_council" / expert["prompt_file"]
+                prompt_path.write_text(req.content)
+                return JSONResponse({"ok": True})
+    return JSONResponse({"error": "Expert not found"}, status_code=404)
+
+
+# ── Council: clear results ────────────────────────────────────
+
+@app.post("/api/council/results/clear")
+async def clear_council_results():
+    """Clear all individual expert results."""
+    results_dir = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts"
+    if results_dir.exists():
+        for path in results_dir.glob("*.json"):
+            path.unlink()
+    # Also clear the synthesis
+    synth_path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / "_synthesis.json"
+    if synth_path.exists():
+        synth_path.unlink()
+    return JSONResponse({"ok": True})
+
+
+# ── Council: synthesize results ───────────────────────────────
+
+@app.post("/api/council/synthesize")
+async def synthesize_results():
+    """Run an LLM call to synthesize all expert outputs into key takeaways."""
+    results_dir = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts"
+    if not results_dir.exists():
+        return JSONResponse({"error": "No expert results to synthesize"}, status_code=400)
+
+    expert_texts = []
+    for path in sorted(results_dir.glob("*.json")):
+        if path.name.startswith("_"):
+            continue
+        data = json.loads(path.read_text())
+        expert_texts.append(f"## {data['role']}\n\n{data['content'][:3000]}")
+
+    if not expert_texts:
+        return JSONResponse({"error": "No expert results to synthesize"}, status_code=400)
+
+    combined = "\n\n---\n\n".join(expert_texts)
+
+    system_prompt = """You are a synthesis expert. You receive research outputs from multiple domain experts about a hopeful future for humanity.
+
+Produce a clear, structured synthesis with:
+1. **Top 5 Key Takeaways** — the most important cross-cutting insights
+2. **Common Themes** — patterns that appear across multiple experts
+3. **Tensions & Trade-offs** — where experts disagree or identify competing priorities
+4. **Strongest Visual Opportunities** — the most cinematic moments suggested across all experts
+5. **Recommended Focus Areas** — what the film should prioritize given all inputs
+
+Be concise and specific. This is for a 3-minute cinematic trailer about an abundant future."""
+
+    import importlib
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+    council = council_mod.LLMCouncil()
+    try:
+        result = await council._call_llm(system_prompt, f"Synthesize these expert research outputs:\n\n{combined}")
+        # Save synthesis
+        synth_path = results_dir / "_synthesis.json"
+        synth_data = {
+            "content": result,
+            "timestamp": datetime.now().isoformat(),
+            "expert_count": len(expert_texts),
+        }
+        synth_path.write_text(json.dumps(synth_data, indent=2))
+        return JSONResponse({"ok": True, "synthesis": synth_data})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/council/synthesis")
+async def get_synthesis():
+    """Get the saved synthesis if it exists."""
+    synth_path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / "_synthesis.json"
+    if not synth_path.exists():
+        return JSONResponse({"synthesis": None})
+    data = json.loads(synth_path.read_text())
+    return JSONResponse({"synthesis": data})
+
+
 # ── Council: phases ──────────────────────────────────────────
 
 @app.get("/api/council/phases")
@@ -276,12 +398,28 @@ async def run_council_start(req: RunCouncilRequest):
         "experts_total": 0,
         "experts_done": 0,
         "current_expert": None,
+        "running_experts": [],
         "error": None,
     }
 
     asyncio.create_task(_run_council_background(job_id, req.phase_id))
 
     return JSONResponse({"ok": True, "job_id": job_id})
+
+
+def _save_expert_result(expert_id: str, role: str, phase_id: str, content: str):
+    """Save a single expert result as its own JSON file for immediate access."""
+    output_dir = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{expert_id}.json"
+    data = {
+        "expert_id": expert_id,
+        "role": role,
+        "phase_id": phase_id,
+        "content": content,
+        "timestamp": datetime.now().isoformat(),
+    }
+    path.write_text(json.dumps(data, indent=2))
 
 
 async def _run_council_background(job_id: str, phase_id: str | None):
@@ -301,49 +439,72 @@ async def _run_council_background(job_id: str, phase_id: str | None):
             job["status"] = "running"
             job["experts_total"] = len(phase.experts)
             job["experts_done"] = 0
-            _log(job, f"Phase: {phase.name} ({len(phase.experts)} experts)")
+            job["phase_name"] = phase.name
+            job["phase_id"] = phase.id
+            _log(job, f"Phase: {phase.name} ({len(phase.experts)} experts, {'parallel' if phase.parallel else 'sequential'})", level="phase")
+
+            if phase.parallel:
+                _log(job, f"Launching {len(phase.experts)} experts in parallel...", level="info")
 
             results = []
             if phase.parallel:
                 async def run_and_track(expert):
+                    job["running_experts"].append(expert.id)
                     job["current_expert"] = expert.role
-                    _log(job, f"  Starting: {expert.role}")
-                    output = await council.run_expert(expert, phase.id)
+                    ctx_info = f" (with context from {len(expert.receives)} sources)" if expert.receives else " (independent)"
+                    _log(job, f"Starting: {expert.role}{ctx_info}", level="start", expert=expert.id)
+                    try:
+                        output = await council.run_expert(expert, phase.id)
+                    finally:
+                        if expert.id in job["running_experts"]:
+                            job["running_experts"].remove(expert.id)
                     job["experts_done"] += 1
-                    _log(job, f"  Complete: {expert.role} ({len(output.content)} chars)")
+                    _save_expert_result(expert.id, expert.role, phase.id, output.content)
+                    preview = output.content[:300].replace('\n', ' ')
+                    _log(job, f"Complete: {expert.role} ({len(output.content)} chars)", level="done", expert=expert.id)
+                    _log(job, f"Preview [{expert.role}]: {preview}", level="preview", expert=expert.id)
                     return output
 
                 tasks = [run_and_track(e) for e in phase.experts]
                 results = list(await asyncio.gather(*tasks))
             else:
-                for expert in phase.experts:
+                for idx, expert in enumerate(phase.experts):
+                    job["running_experts"] = [expert.id]
                     job["current_expert"] = expert.role
-                    _log(job, f"  Starting: {expert.role}")
+                    ctx_info = f" (with context from {len(expert.receives)} sources)" if expert.receives else " (independent)"
+                    _log(job, f"[{idx+1}/{len(phase.experts)}] Starting: {expert.role}{ctx_info}", level="start", expert=expert.id)
+                    _log(job, f"Calling LLM: {council.llm_config['model']}...", level="info")
                     output = await council.run_expert(expert, phase.id)
+                    job["running_experts"] = []
                     results.append(output)
                     job["experts_done"] += 1
-                    _log(job, f"  Complete: {expert.role} ({len(output.content)} chars)")
+                    _save_expert_result(expert.id, expert.role, phase.id, output.content)
+                    preview = output.content[:300].replace('\n', ' ')
+                    _log(job, f"Complete: {expert.role} ({len(output.content)} chars)", level="done", expert=expert.id)
+                    _log(job, f"Preview [{expert.role}]: {preview}", level="preview", expert=expert.id)
 
             council.save_phase_artifact(phase, results)
-            _log(job, f"Phase complete: {phase.name}")
+            _log(job, f"Artifact saved for phase: {phase.name}", level="save")
 
             if phase.checkpoint:
-                _log(job, f"CHECKPOINT — {phase.name} requires review")
+                _log(job, f"CHECKPOINT — {phase.name} requires human review before next phase", level="checkpoint")
                 break
 
         job["status"] = "complete"
         job["current_expert"] = None
-        _log(job, "Done")
+        _log(job, "All done — results saved to artifacts", level="done")
 
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
-        _log(job, f"ERROR: {e}")
+        import traceback
+        _log(job, f"ERROR: {e}", level="error")
+        _log(job, traceback.format_exc(), level="error")
 
 
-def _log(job: dict, msg: str):
+def _log(job: dict, msg: str, level: str = "info", expert: str | None = None):
     ts = datetime.now().strftime("%H:%M:%S")
-    job["logs"].append({"time": ts, "message": msg})
+    job["logs"].append({"time": ts, "message": msg, "level": level, "expert": expert})
 
 
 @app.get("/api/jobs/{job_id}")
@@ -374,10 +535,14 @@ async def stream_job(job_id: str):
                         "type": "log",
                         "time": log["time"],
                         "message": log["message"],
+                        "level": log.get("level", "info"),
+                        "expert": log.get("expert"),
                         "status": job["status"],
                         "experts_done": job["experts_done"],
                         "experts_total": job["experts_total"],
                         "current_expert": job["current_expert"],
+                        "running_experts": job.get("running_experts", []),
+                        "phase_name": job.get("phase_name"),
                     })
                     yield f"data: {data}\n\n"
                 last_log_count = len(current_logs)

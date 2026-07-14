@@ -12,7 +12,13 @@ Not a lecture. Not a montage of cool technology. A story with a protagonist, an 
 
 - **3 minutes exactly.** At 24fps, that's 4,320 frames. At typical trailer pacing, that's 25-35 shots.
 - **Must depict a hopeful, compelling, abundant future** spanning 10 to 100 years from now.
-- **Must connect to the Metaninoa chapter** of the Disorder universe (the Lore Keeper will refine this).
+- **Must connect to the Metanoia chapter** of the Disordine universe (the Lore Keeper will refine this).
+- **Story before spectacle** — every scene serves the narrative and emotional journey, not just visual impact.
+- **Optimism without naivete** — hopeful because hard problems were solved, not because they never existed.
+- **Plausibility over fantasy** — grounded in developments audiences can imagine emerging in coming decades.
+- **Human-centered** — technology expands human potential; it is not the protagonist.
+- **Emotional resonance above all** — the audience remembers the feeling long after the visuals fade.
+- **Accessible to newcomers** — must work for viewers with zero knowledge of the Disordine universe.
 - **Must make an audience feel something.** Not "that was informative." Something closer to awe, recognition, yearning, or hope.
 
 ## The Core Problem

@@ -41,7 +41,7 @@ For each shot in the 3-minute trailer, provide:
 ## What to Produce
 
 ```
-## Production Shot List — Metaninoa Trailer
+## Production Shot List — Metanoia Trailer
 
 ### Overview
 - Total shots: [number]

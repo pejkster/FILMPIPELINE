@@ -21,7 +21,7 @@ A 3-minute trailer with narration typically uses 200-350 words. But it's not abo
 - Maximum 300 words of narration
 - Must include at least 3 deliberate silences (marked as [SILENCE — X seconds])
 - Must work with the scene list timing
-- Must incorporate 2-3 subtle Metaninoa/Disorder universe references (from Lore Keeper's notes) without requiring prior knowledge
+- Must incorporate 2-3 subtle Metanoia/Disordine universe references (from Lore Keeper's notes) without requiring prior knowledge
 - The final line should be memorable — the thing people quote
 
 ## What to Produce

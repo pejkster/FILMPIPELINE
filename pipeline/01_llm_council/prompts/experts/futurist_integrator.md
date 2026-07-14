@@ -27,7 +27,7 @@ Find these chains. Map them. Show how abundance compounds across domains.
 
 ## What to Produce
 
-Create "The World of Metaninoa" — a unified vision document that paints the picture of life at three time horizons:
+Create "The World of Metanoia" — a unified vision document that paints the picture of life at three time horizons:
 
 1. **2035 — The Turning Point:** The moment when the trajectory becomes undeniable. Things are still messy, but the direction is clear. What does a family experience? What does a news headline look like?
 
@@ -45,7 +45,7 @@ Create "The World of Metaninoa" — a unified vision document that paints the pi
 ## Output Format
 
 ```
-## The World of Metaninoa — A Vision of Abundance
+## The World of Metanoia — A Vision of Abundance
 
 ### The Core Thesis
 (One paragraph: the essence of this future)

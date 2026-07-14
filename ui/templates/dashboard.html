@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Metaninoa — Pipeline Dashboard</title>
+  <title>Metanoia — Pipeline Dashboard</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div class="header">
-    <h1>Metaninoa <span>Pipeline</span></h1>
+    <h1>Metanoia <span>Pipeline</span></h1>
     <div class="header-meta">
       <span id="countdown"></span>
       <span class="deadline">Deadline: Aug 14, 2026</span>
@@ -17,12 +17,36 @@
 
   <div class="container">
     <div id="pipeline-flow" class="pipeline-flow"></div>
-    <div id="detail-panel" class="detail-panel">
-      <div class="empty-state">
-        <div class="empty-icon">←</div>
-        <p>Select a stage above to view its artifacts and configuration</p>
+
+    <div class="workspace">
+      <!-- Left: tabs + content -->
+      <div id="detail-panel" class="detail-panel">
+        <div id="detail-content">
+          <div class="empty-state">
+            <div class="empty-icon">←</div>
+            <p>Select a stage above to view its artifacts and configuration</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: persistent console -->
+      <div class="console-panel" id="console-panel">
+        <div class="console-header">
+          <h4>Console</h4>
+          <div class="console-header-right">
+            <span class="console-status" id="console-status" style="display:none"></span>
+            <button class="btn btn-sm console-clear-btn" onclick="clearConsole()">Clear</button>
+          </div>
+        </div>
+        <div class="console-log" id="console-log">
+          <div class="console-empty">Run a phase to see live progress here</div>
+        </div>
       </div>
     </div>
+  </div>
+
+  <div id="expert-modal" class="expert-modal">
+    <div class="expert-modal-inner" id="expert-modal-body"></div>
   </div>
 
   <div id="lightbox" class="lightbox">

@@ -11,7 +11,7 @@ phases:
   - id: research
     name: "Research & Grounding"
     description: "Domain experts produce briefings on current trajectories toward abundance"
-    parallel: true
+    parallel: false
     checkpoint: false
     experts:
       - id: energy_analyst
