@@ -1,13 +1,15 @@
 """Dashboard API — serves pipeline state, checkpoint actions, and Runware generation."""
 
+import asyncio
 import json
 import uuid
 from datetime import datetime
 from pathlib import Path
 
+import yaml
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -48,12 +50,15 @@ STAGE_META = {
     },
 }
 
+# ── Background job tracking ──────────────────────────────────
+
+jobs: dict[str, dict] = {}
+
 
 def load_stage_config(stage: int) -> dict:
     config_path = PIPELINE_ROOT / STAGE_DIRS[stage] / "config" / "stage.yaml"
     if not config_path.exists():
         return {}
-    import yaml
     with open(config_path) as f:
         return yaml.safe_load(f)
 
@@ -87,7 +92,6 @@ def get_stage_status(stage: int, artifacts: list[dict]) -> str:
 
 
 def save_generation_artifact(stage: int, artifact_type: str, content: dict) -> dict:
-    """Save a generated artifact to the stage's output directory."""
     output_dir = PIPELINE_ROOT / STAGE_DIRS[stage] / "outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -179,52 +183,45 @@ async def delete_artifact(stage: int, filename: str):
     return JSONResponse({"ok": True})
 
 
-# ── Stage run ─────────────────────────────────────────────────
+# ── Council: expert detail ───────────────────────────────────
 
-class RunCouncilRequest(BaseModel):
-    phase_id: str | None = None
+@app.get("/api/council/expert/{expert_id}")
+async def get_expert_detail(expert_id: str):
+    """Get full details for an expert including their prompt."""
+    config = load_stage_config(1)
+    for phase in config["phases"]:
+        for expert in phase["experts"]:
+            if expert["id"] == expert_id:
+                prompt_path = PIPELINE_ROOT / "01_llm_council" / expert["prompt_file"]
+                prompt_content = prompt_path.read_text() if prompt_path.exists() else ""
+
+                # Find any existing output for this expert
+                artifacts = load_stage_artifacts(1)
+                expert_output = None
+                for a in artifacts:
+                    for eo in a.get("content", {}).get("expert_outputs", []):
+                        if eo.get("expert_id") == expert_id:
+                            expert_output = eo
+
+                return JSONResponse({
+                    "id": expert["id"],
+                    "role": expert["role"],
+                    "phase_id": phase["id"],
+                    "phase_name": phase["name"],
+                    "prompt_file": expert["prompt_file"],
+                    "prompt": prompt_content,
+                    "receives": expert.get("receives", []),
+                    "output": expert_output,
+                })
+
+    return JSONResponse({"error": "Expert not found"}, status_code=404)
 
 
-@app.post("/api/stages/{stage}/run")
-async def run_stage_endpoint(stage: int):
-    return JSONResponse({
-        "ok": True,
-        "message": f"Stage {stage} ({STAGE_META[stage]['name']}) triggered",
-        "note": "Use /api/council/run for Stage 1",
-    })
-
-
-@app.post("/api/council/run")
-async def run_council(req: RunCouncilRequest):
-    """Run the LLM Council — optionally a specific phase."""
-    import importlib
-
-    council_mod = importlib.import_module("pipeline.01_llm_council.council")
-    LLMCouncil = council_mod.LLMCouncil
-
-    try:
-        council = LLMCouncil()
-        artifacts = await council.run_council(req.phase_id)
-
-        return JSONResponse({
-            "ok": True,
-            "phase": req.phase_id or "all",
-            "artifacts_produced": len(artifacts),
-            "message": f"Council produced {len(artifacts)} artifact(s)",
-        })
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-
+# ── Council: phases ──────────────────────────────────────────
 
 @app.get("/api/council/phases")
 async def get_council_phases():
-    """Get the council phase structure and status."""
-    import yaml
-
-    config_path = PIPELINE_ROOT / "01_llm_council" / "config" / "stage.yaml"
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-
+    config = load_stage_config(1)
     artifacts = load_stage_artifacts(1)
 
     phases = []
@@ -259,6 +256,159 @@ async def get_council_phases():
         })
 
     return JSONResponse({"phases": phases})
+
+
+# ── Council: run with SSE streaming ──────────────────────────
+
+class RunCouncilRequest(BaseModel):
+    phase_id: str | None = None
+
+
+@app.post("/api/council/run")
+async def run_council_start(req: RunCouncilRequest):
+    """Start a council run as a background job. Returns a job_id for SSE polling."""
+    job_id = str(uuid.uuid4())[:8]
+    jobs[job_id] = {
+        "status": "starting",
+        "phase_id": req.phase_id,
+        "logs": [],
+        "started_at": datetime.now().isoformat(),
+        "experts_total": 0,
+        "experts_done": 0,
+        "current_expert": None,
+        "error": None,
+    }
+
+    asyncio.create_task(_run_council_background(job_id, req.phase_id))
+
+    return JSONResponse({"ok": True, "job_id": job_id})
+
+
+async def _run_council_background(job_id: str, phase_id: str | None):
+    """Run council in background, updating job state for SSE consumers."""
+    import importlib
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+
+    job = jobs[job_id]
+    try:
+        council = council_mod.LLMCouncil()
+
+        phases_to_run = council.phases
+        if phase_id:
+            phases_to_run = [p for p in council.phases if p.id == phase_id]
+
+        for phase in phases_to_run:
+            job["status"] = "running"
+            job["experts_total"] = len(phase.experts)
+            job["experts_done"] = 0
+            _log(job, f"Phase: {phase.name} ({len(phase.experts)} experts)")
+
+            results = []
+            if phase.parallel:
+                async def run_and_track(expert):
+                    job["current_expert"] = expert.role
+                    _log(job, f"  Starting: {expert.role}")
+                    output = await council.run_expert(expert, phase.id)
+                    job["experts_done"] += 1
+                    _log(job, f"  Complete: {expert.role} ({len(output.content)} chars)")
+                    return output
+
+                tasks = [run_and_track(e) for e in phase.experts]
+                results = list(await asyncio.gather(*tasks))
+            else:
+                for expert in phase.experts:
+                    job["current_expert"] = expert.role
+                    _log(job, f"  Starting: {expert.role}")
+                    output = await council.run_expert(expert, phase.id)
+                    results.append(output)
+                    job["experts_done"] += 1
+                    _log(job, f"  Complete: {expert.role} ({len(output.content)} chars)")
+
+            council.save_phase_artifact(phase, results)
+            _log(job, f"Phase complete: {phase.name}")
+
+            if phase.checkpoint:
+                _log(job, f"CHECKPOINT — {phase.name} requires review")
+                break
+
+        job["status"] = "complete"
+        job["current_expert"] = None
+        _log(job, "Done")
+
+    except Exception as e:
+        job["status"] = "error"
+        job["error"] = str(e)
+        _log(job, f"ERROR: {e}")
+
+
+def _log(job: dict, msg: str):
+    ts = datetime.now().strftime("%H:%M:%S")
+    job["logs"].append({"time": ts, "message": msg})
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job_status(job_id: str):
+    """Poll job status."""
+    if job_id not in jobs:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    return JSONResponse(jobs[job_id])
+
+
+@app.get("/api/jobs/{job_id}/stream")
+async def stream_job(job_id: str):
+    """SSE stream of job progress."""
+    if job_id not in jobs:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+
+    async def event_generator():
+        last_log_count = 0
+        while True:
+            job = jobs.get(job_id)
+            if not job:
+                break
+
+            current_logs = job["logs"]
+            if len(current_logs) > last_log_count:
+                for log in current_logs[last_log_count:]:
+                    data = json.dumps({
+                        "type": "log",
+                        "time": log["time"],
+                        "message": log["message"],
+                        "status": job["status"],
+                        "experts_done": job["experts_done"],
+                        "experts_total": job["experts_total"],
+                        "current_expert": job["current_expert"],
+                    })
+                    yield f"data: {data}\n\n"
+                last_log_count = len(current_logs)
+
+            if job["status"] in ("complete", "error"):
+                data = json.dumps({
+                    "type": "done",
+                    "status": job["status"],
+                    "error": job.get("error"),
+                })
+                yield f"data: {data}\n\n"
+                break
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── Stage run placeholder ────────────────────────────────────
+
+@app.post("/api/stages/{stage}/run")
+async def run_stage_endpoint(stage: int):
+    return JSONResponse({
+        "ok": True,
+        "message": f"Stage {stage} ({STAGE_META[stage]['name']}) triggered",
+        "note": "Use /api/council/run for Stage 1",
+    })
 
 
 # ── Runware generation API ───────────────────────────────────
@@ -304,141 +454,82 @@ class UpscaleRequest(BaseModel):
 
 @app.post("/api/generate/image")
 async def generate_image(req: GenerateImageRequest):
-    """Generate an image via Runware and save as an artifact."""
     from pipeline.shared.services.runware_service import get_runware_service
-
     try:
         service = get_runware_service()
         images = await service.generate_image(
-            prompt=req.prompt,
-            negative_prompt=req.negative_prompt,
-            width=req.width,
-            height=req.height,
-            model=req.model,
-            number_results=req.number_results,
-            steps=req.steps,
-            cfg_scale=req.cfg_scale,
-            seed=req.seed,
+            prompt=req.prompt, negative_prompt=req.negative_prompt,
+            width=req.width, height=req.height, model=req.model,
+            number_results=req.number_results, steps=req.steps,
+            cfg_scale=req.cfg_scale, seed=req.seed,
         )
-
         artifact = save_generation_artifact(
-            stage=req.stage,
-            artifact_type=req.artifact_type,
-            content={
-                "label": req.label or req.prompt[:80],
-                "prompt": req.prompt,
-                "negative_prompt": req.negative_prompt,
-                "model": req.model,
-                "dimensions": f"{req.width}x{req.height}",
-                "images": images,
-            },
+            stage=req.stage, artifact_type=req.artifact_type,
+            content={"label": req.label or req.prompt[:80], "prompt": req.prompt,
+                     "negative_prompt": req.negative_prompt, "model": req.model,
+                     "dimensions": f"{req.width}x{req.height}", "images": images},
         )
         return JSONResponse({"ok": True, "artifact": artifact, "images": images})
-
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @app.post("/api/generate/character")
 async def generate_character(req: GenerateCharacterRequest):
-    """Generate a character reference sheet via Runware."""
     from pipeline.shared.services.runware_service import get_runware_service
-
     try:
         service = get_runware_service()
         views = await service.generate_character_sheet(
-            name=req.name,
-            description=req.description,
-            style_prompt=req.style_prompt,
-        )
-
+            name=req.name, description=req.description, style_prompt=req.style_prompt)
         artifact = save_generation_artifact(
-            stage=2,
-            artifact_type="character_profile",
-            content={
-                "name": req.name,
-                "description": req.description,
-                "style_prompt": req.style_prompt,
-                "views": views,
-            },
-        )
+            stage=2, artifact_type="character_profile",
+            content={"name": req.name, "description": req.description,
+                     "style_prompt": req.style_prompt, "views": views})
         return JSONResponse({"ok": True, "artifact": artifact, "views": views})
-
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @app.post("/api/generate/environment")
 async def generate_environment(req: GenerateEnvironmentRequest):
-    """Generate environment concept art via Runware."""
     from pipeline.shared.services.runware_service import get_runware_service
-
     try:
         service = get_runware_service()
         images = await service.generate_environment(
-            name=req.name,
-            description=req.description,
-            style_prompt=req.style_prompt,
-        )
-
+            name=req.name, description=req.description, style_prompt=req.style_prompt)
         artifact = save_generation_artifact(
-            stage=2,
-            artifact_type="environment_spec",
-            content={
-                "name": req.name,
-                "description": req.description,
-                "style_prompt": req.style_prompt,
-                "images": images,
-            },
-        )
+            stage=2, artifact_type="environment_spec",
+            content={"name": req.name, "description": req.description,
+                     "style_prompt": req.style_prompt, "images": images})
         return JSONResponse({"ok": True, "artifact": artifact, "images": images})
-
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @app.post("/api/generate/shot")
 async def generate_shot(req: GenerateShotRequest):
-    """Generate a cinematic shot frame via Runware."""
     from pipeline.shared.services.runware_service import get_runware_service
-
     try:
         service = get_runware_service()
         images = await service.generate_shot(
-            description=req.description,
-            style_prompt=req.style_prompt,
-            width=req.width,
-            height=req.height,
-        )
-
+            description=req.description, style_prompt=req.style_prompt,
+            width=req.width, height=req.height)
         artifact = save_generation_artifact(
-            stage=3,
-            artifact_type="shot_image",
-            content={
-                "description": req.description,
-                "style_prompt": req.style_prompt,
-                "dimensions": f"{req.width}x{req.height}",
-                "images": images,
-            },
-        )
+            stage=3, artifact_type="shot_image",
+            content={"description": req.description, "style_prompt": req.style_prompt,
+                     "dimensions": f"{req.width}x{req.height}", "images": images})
         return JSONResponse({"ok": True, "artifact": artifact, "images": images})
-
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @app.post("/api/generate/upscale")
 async def upscale_image(req: UpscaleRequest):
-    """Upscale an image via Runware."""
     from pipeline.shared.services.runware_service import get_runware_service
-
     try:
         service = get_runware_service()
         result = await service.upscale_image(
-            image_url=req.image_url,
-            upscale_factor=req.upscale_factor,
-        )
+            image_url=req.image_url, upscale_factor=req.upscale_factor)
         return JSONResponse({"ok": True, "result": result})
-
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
