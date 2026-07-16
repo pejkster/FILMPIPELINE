@@ -79,6 +79,9 @@ phases:
   - id: poet
     role: Poet / Lyricist
     prompt_file: prompts/experts/poet.md
+  - id: scene_architect
+    role: Scene Architect
+    prompt_file: prompts/experts/scene_architect.md
 - id: treatment
   name: Treatment & Deliverable Assembly
   description: Produce the final 12-page treatment and production-ready scene breakdown

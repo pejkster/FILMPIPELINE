@@ -7,10 +7,11 @@ let currentJobId = null;
 let selectedExpert = null;
 let activeEvtSource = null;
 let expertResults = {};
-let synthesisData = null;
+let synthesisData = {};  // keyed by stage
 let runningExperts = new Set();
 let expertRegistry = null;
 let draggedExpert = null;
+let wbBriefs = null;
 
 function getCouncilPhases(stage) {
   const cd = councilData[stage];
@@ -46,6 +47,7 @@ async function fetchPipeline() {
   }
   await fetchExpertResults();
   await fetchSynthesis();
+  await fetchBriefs();
   await fetchExpertRegistry();
   render();
 }
@@ -63,9 +65,19 @@ async function fetchExpertResults() {
 
 async function fetchSynthesis() {
   try {
-    const res = await fetch('/api/council/synthesis');
+    for (const s of [1, 2]) {
+      const res = await fetch(`/api/council/synthesis?stage=${s}`);
+      const data = await res.json();
+      synthesisData[s] = data.synthesis;
+    }
+  } catch (e) {}
+}
+
+async function fetchBriefs() {
+  try {
+    const res = await fetch('/api/council/briefs?stage=2');
     const data = await res.json();
-    synthesisData = data.synthesis;
+    wbBriefs = data.briefs;
   } catch (e) {}
 }
 
@@ -73,7 +85,6 @@ function render() {
   renderStages();
   renderExpertSidebar();
   renderDetailPanel();
-  renderConsole();
 }
 
 // ── Stage cards ─────────────────────────────────────────────
@@ -120,18 +131,37 @@ function renderDetailPanel() {
   }
   const stage = pipelineData.stages.find(s => s.stage === selectedStage);
   const expertCount = Object.keys(expertResults).length;
-  const tabs = [
-    { id: 'generate', label: currentStageHasCouncil() ? 'Council' : 'Generate' },
-    { id: 'progress', label: `Progress${expertCount > 0 ? ` (${expertCount})` : ''}` },
-    { id: 'artifacts', label: `Artifacts (${stage.artifact_count})` },
-    { id: 'config', label: 'Config' },
-  ];
+  let tabs;
+  if (selectedStage === 2) {
+    const charCount = stage.artifacts.filter(a => a.type === 'character_profile').length;
+    const envCount = stage.artifacts.filter(a => a.type === 'environment_spec').length;
+    tabs = [
+      { id: 'generate', label: 'Council' },
+      { id: 'wb-synthesis', label: 'Synthesis' },
+      { id: 'wb-characters', label: `Characters${charCount ? ` (${charCount})` : ''}` },
+      { id: 'wb-environments', label: `Environments${envCount ? ` (${envCount})` : ''}` },
+      { id: 'wb-styleguide', label: 'Style Guide' },
+      { id: 'progress', label: `Progress${expertCount > 0 ? ` (${expertCount})` : ''}` },
+      { id: 'config', label: 'Config' },
+    ];
+  } else {
+    tabs = [
+      { id: 'generate', label: currentStageHasCouncil() ? 'Council' : 'Generate' },
+      { id: 'progress', label: `Progress${expertCount > 0 ? ` (${expertCount})` : ''}` },
+      { id: 'artifacts', label: `Artifacts (${stage.artifact_count})` },
+      { id: 'config', label: 'Config' },
+    ];
+  }
   const tabsHtml = tabs.map(t =>
     `<button class="tab ${activeTab === t.id ? 'active' : ''}" onclick="activeTab='${t.id}'; selectedExpert=null; render();">${t.label}</button>`
   ).join('');
 
   let contentHtml = '';
   if (activeTab === 'generate') contentHtml = renderGeneratePanel(stage);
+  else if (activeTab === 'wb-synthesis') contentHtml = renderWBSynthesisPanel(stage);
+  else if (activeTab === 'wb-characters') contentHtml = renderWBCharactersPanel(stage);
+  else if (activeTab === 'wb-environments') contentHtml = renderWBEnvironmentsPanel(stage);
+  else if (activeTab === 'wb-styleguide') contentHtml = renderWBStyleGuidePanel(stage);
   else if (activeTab === 'progress') contentHtml = renderProgressPanel(stage);
   else if (activeTab === 'artifacts') contentHtml = renderArtifacts(stage);
   else if (activeTab === 'config') contentHtml = `<div class="config-panel">${formatConfig(stage.config)}</div>`;
@@ -145,50 +175,50 @@ function renderDetailPanel() {
     <div id="tab-content">${contentHtml}</div>`;
 }
 
-// ── Console ─────────────────────────────────────────────────
+// ── Notifications (replaced console) ────────────────────────
 
-function renderConsole() {
-  const logEl = document.getElementById('console-log');
-  const statusEl = document.getElementById('console-status');
-  if (!logEl) return;
-  logEl.innerHTML = '';
-  if (consoleLogs.length === 0) {
-    logEl.innerHTML = '<div class="console-empty">Run a phase to see live progress here</div>';
-  } else {
-    consoleLogs.forEach(e => logEl.appendChild(makeConsoleLine(e)));
-    logEl.scrollTop = logEl.scrollHeight;
-  }
-  if (statusEl) {
-    if (consoleStatus) {
-      statusEl.textContent = consoleStatus.text;
-      statusEl.className = `console-status ${consoleStatus.cls}`;
-      statusEl.style.display = '';
-    } else {
-      statusEl.style.display = consoleLogs.length ? '' : 'none';
-      if (consoleLogs.length) { statusEl.textContent = 'Idle'; statusEl.className = 'console-status'; }
-    }
-  }
-}
-
-function makeConsoleLine(entry) {
-  const line = document.createElement('div');
-  line.className = `console-line console-${entry.level || 'info'}`;
-  const icons = { phase:'▶ ', start:'  ◦ ', done:'  ● ', preview:'    ', save:'  💾 ', checkpoint:'  🔒 ', error:'  ✕ ' };
-  line.innerHTML = `<span class="console-time">${entry.time}</span>${icons[entry.level]||'  '}${escapeHtml(entry.message)}`;
-  return line;
-}
+function renderConsole() {}
 
 function consolePush(entry) {
   consoleLogs.push(entry);
-  const logEl = document.getElementById('console-log');
-  if (!logEl) return;
-  const empty = logEl.querySelector('.console-empty');
-  if (empty) empty.remove();
-  logEl.appendChild(makeConsoleLine(entry));
-  logEl.scrollTop = logEl.scrollHeight;
+  // Show important events as toasts
+  if (entry.level === 'done' || entry.level === 'error' || entry.level === 'phase') {
+    showNotification(entry.message, entry.level);
+  }
 }
 
-function clearConsole() { consoleLogs.length = 0; consoleStatus = null; renderConsole(); }
+function clearConsole() { consoleLogs.length = 0; consoleStatus = null; }
+
+function showNotification(msg, level = 'info') {
+  const container = document.getElementById('notifications') || createNotificationContainer();
+  const el = document.createElement('div');
+  const icons = { phase: '▶', done: '●', error: '✕', info: '○' };
+  el.className = `notification notification-${level}`;
+  el.innerHTML = `<span class="notification-icon">${icons[level] || '○'}</span> ${escapeHtml(msg)}`;
+  container.appendChild(el);
+  setTimeout(() => { el.classList.add('fade-out'); setTimeout(() => el.remove(), 300); }, 5000);
+  // Keep max 6 notifications visible
+  while (container.children.length > 6) container.firstChild.remove();
+}
+
+function createNotificationContainer() {
+  const el = document.createElement('div');
+  el.id = 'notifications';
+  el.className = 'notification-container';
+  document.body.appendChild(el);
+  return el;
+}
+
+// ── Expert sidebar ────────────────────────────────────────
+
+function toggleExpertSidebar() {
+  const sidebar = document.getElementById('expert-sidebar');
+  const workspace = sidebar.closest('.workspace');
+  sidebar.classList.toggle('collapsed');
+  workspace.classList.toggle('sidebar-collapsed');
+  const btn = sidebar.querySelector('.sidebar-collapse-btn');
+  btn.textContent = sidebar.classList.contains('collapsed') ? '▶' : '◀';
+}
 
 // ── Generate panel ──────────────────────────────────────────
 
@@ -202,59 +232,68 @@ function renderCouncilPanel() {
   if (!currentStageHasCouncil()) return '<div class="generate-panel"><p>No council phases configured for this stage.</p></div>';
   if (selectedExpert) return renderExpertDetail();
 
-  const phases = getCouncilPhases(selectedStage);
+  const allPhases = getCouncilPhases(selectedStage);
+  // For Stage 2, characters and environments have their own tabs
+  const WB_DEDICATED_PHASES = ['characters', 'environments'];
+  const phases = selectedStage === 2 ? allPhases.filter(p => !WB_DEDICATED_PHASES.includes(p.id)) : allPhases;
+
   let html = '<div class="council-phases">';
   phases.forEach((phase, i) => {
-    const sc = { idle:'var(--text-muted)', pending:'var(--info)', approved:'var(--success)', rejected:'var(--danger)' };
-    const si = { idle:'○', pending:'◐', approved:'●', rejected:'✕' };
-    html += `
-      <div class="council-phase phase-active">
-        <div class="phase-header">
-          <div class="phase-status" style="color:${sc[phase.status]}">${si[phase.status]}</div>
-          <div class="phase-title"><h4>${phase.name}</h4><p>${phase.description}</p></div>
-          <span class="status-badge status-${phase.status}">${phase.status}</span>
-        </div>
-        <div class="phase-mode-bar">
-          <span class="phase-mode-label">Mode:</span>
-          <button class="phase-mode-btn ${phase.mode === 'parallel' ? 'active' : ''}" onclick="event.stopPropagation(); setPhaseMode('${phase.id}', 'parallel')">Parallel</button>
-          <button class="phase-mode-btn ${phase.mode === 'sequential' ? 'active' : ''}" onclick="event.stopPropagation(); setPhaseMode('${phase.id}', 'sequential')">Sequential</button>
-          <span class="phase-mode-desc">${phase.mode === 'parallel' ? 'Experts run independently, previous phase context only' : 'Experts chain within phase + previous phase context'}</span>
-        </div>
-        <div class="phase-mode-bar">
-          <span class="phase-mode-label">Context:</span>
-          <select class="context-level-select" onchange="event.stopPropagation(); setContextLevel('${phase.id}', this.value)">
-            ${['none','basic','futurax','disordine'].map(l => `<option value="${l}" ${phase.context_level === l ? 'selected' : ''}>${l === 'none' ? 'None' : l === 'futurax' ? 'FuturaX' : l.charAt(0).toUpperCase() + l.slice(1)}</option>`).join('')}
-          </select>
-          <button class="btn-icon" onclick="event.stopPropagation(); previewContext('${phase.context_level || 'none'}')" title="Preview context preamble">👁</button>
-        </div>
-        ${selectedStage > 1 ? `<div class="phase-mode-bar">
-          <span class="phase-mode-label">Stage 1 Context:</span>
-          <button class="prior-context-toggle ${phase.include_prior_stage_context ? 'active' : ''}" onclick="event.stopPropagation(); togglePriorContext('${phase.id}', ${!phase.include_prior_stage_context})">
-            ${phase.include_prior_stage_context ? '✓ Included' : '✗ Off'}
-          </button>
-          <span class="phase-mode-desc">Feed outputs from previous stage into this phase's experts</span>
-        </div>` : ''}
-        <div class="phase-experts-drop" ondragover="event.preventDefault(); this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="dropToPhase(event, '${phase.id}', this)">
-          ${phase.experts.map(e => {
-            const done = !!expertResults[e.id];
-            const running = runningExperts.has(e.id);
-            const cls = running ? 'running' : done ? 'has-result' : '';
-            return `<span class="expert-chip clickable ${cls}" onclick="event.stopPropagation(); loadExpert('${e.id}')">
-              ${e.role}
-              <button class="expert-chip-remove" onclick="event.stopPropagation(); removeExpertFromPhase('${phase.id}', '${e.id}')" title="Remove from phase">×</button>
-            </span>`;
-          }).join('')}
-          ${phase.experts.length === 0 ? '<span class="registry-empty">Drag experts here from the sidebar</span>' : ''}
-        </div>
-        <div class="phase-actions">
-          <button class="btn btn-primary" onclick="event.stopPropagation(); runCouncilPhase('${phase.id}')" id="btn-phase-${phase.id}">${phase.status === 'idle' ? 'Run Phase' : 'Re-run'}</button>
-          ${currentJobId ? `<button class="btn btn-sm btn-danger-outline" onclick="event.stopPropagation(); stopGeneration()">Stop</button>` : ''}
-          ${phase.status === 'pending' && phase.checkpoint ? `<button class="btn btn-approve btn-sm" onclick="event.stopPropagation(); approvePhase('${phase.id}')">Approve</button>` : ''}
-        </div>
-      </div>`;
+    html += renderPhaseBlock(phase);
     if (i < phases.length - 1) html += `<div class="council-connector ${phase.status === 'approved' ? 'passed' : ''}">${phase.status === 'approved' ? '↓' : '⋮'}</div>`;
   });
   return html + '</div>';
+}
+
+function renderPhaseBlock(phase, compact = false) {
+  const sc = { idle:'var(--text-muted)', pending:'var(--info)', approved:'var(--success)', rejected:'var(--danger)' };
+  const si = { idle:'○', pending:'◐', approved:'●', rejected:'✕' };
+  return `
+    <div class="council-phase phase-active">
+      <div class="phase-header">
+        <div class="phase-status" style="color:${sc[phase.status]}">${si[phase.status]}</div>
+        <div class="phase-title"><h4>${phase.name}</h4><p>${phase.description}</p></div>
+        <span class="status-badge status-${phase.status}">${phase.status}</span>
+      </div>
+      ${compact ? '' : `<div class="phase-mode-bar">
+        <span class="phase-mode-label">Mode:</span>
+        <button class="phase-mode-btn ${phase.mode === 'parallel' ? 'active' : ''}" onclick="event.stopPropagation(); setPhaseMode('${phase.id}', 'parallel')">Parallel</button>
+        <button class="phase-mode-btn ${phase.mode === 'sequential' ? 'active' : ''}" onclick="event.stopPropagation(); setPhaseMode('${phase.id}', 'sequential')">Sequential</button>
+        <span class="phase-mode-desc">${phase.mode === 'parallel' ? 'Experts run independently' : 'Experts chain sequentially'}</span>
+      </div>
+      <div class="phase-mode-bar">
+        <span class="phase-mode-label">Context:</span>
+        <select class="context-level-select" onchange="event.stopPropagation(); setContextLevel('${phase.id}', this.value)">
+          ${['none','basic','futurax','disordine'].map(l => `<option value="${l}" ${phase.context_level === l ? 'selected' : ''}>${l === 'none' ? 'None' : l === 'futurax' ? 'FuturaX' : l.charAt(0).toUpperCase() + l.slice(1)}</option>`).join('')}
+        </select>
+        <button class="btn-icon" onclick="event.stopPropagation(); previewContext('${phase.context_level || 'none'}')" title="Preview context preamble">👁</button>
+      </div>
+      ${selectedStage > 1 ? `<div class="phase-mode-bar">
+        <span class="phase-mode-label">Stage 1 Context:</span>
+        <button class="prior-context-toggle ${phase.include_prior_stage_context ? 'active' : ''}" onclick="event.stopPropagation(); togglePriorContext('${phase.id}', ${!phase.include_prior_stage_context})">
+          ${phase.include_prior_stage_context ? '✓ Included' : '✗ Off'}
+        </button>
+        <span class="phase-mode-desc">Feed outputs from previous stage into this phase's experts</span>
+      </div>` : ''}`}
+      <div class="phase-experts-drop" ondragover="event.preventDefault(); this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="dropToPhase(event, '${phase.id}', this)">
+        ${phase.experts.map(e => {
+          const done = !!expertResults[e.id];
+          const running = runningExperts.has(e.id);
+          const cls = running ? 'running' : done ? 'has-result' : '';
+          return `<span class="expert-chip clickable ${cls}" onclick="event.stopPropagation(); loadExpert('${e.id}')">
+            ${e.role}
+            <button class="expert-chip-remove" onclick="event.stopPropagation(); removeExpertFromPhase('${phase.id}', '${e.id}')" title="Remove from phase">×</button>
+          </span>`;
+        }).join('')}
+        ${phase.experts.length === 0 ? '<span class="registry-empty">Drag experts here from the sidebar</span>' : ''}
+      </div>
+      <div class="phase-actions">
+        <button class="btn btn-primary" onclick="event.stopPropagation(); runCouncilPhase('${phase.id}')" id="btn-phase-${phase.id}">${phase.status === 'idle' ? 'Run Phase' : 'Re-run'}</button>
+        ${phase.experts.some(e => expertResults[e.id]) ? `<button class="btn btn-sm" onclick="event.stopPropagation(); synthesizePhase('${phase.id}')" id="btn-synth-${phase.id}">Synthesize</button>` : ''}
+        ${currentJobId ? `<button class="btn btn-sm btn-danger-outline" onclick="event.stopPropagation(); stopGeneration()">Stop</button>` : ''}
+        ${phase.status === 'pending' && phase.checkpoint ? `<button class="btn btn-approve btn-sm" onclick="event.stopPropagation(); approvePhase('${phase.id}')">Approve</button>` : ''}
+      </div>
+    </div>`;
 }
 
 // ── Progress tab ────────────────────────────────────────────
@@ -864,20 +903,21 @@ function renderArtifacts(stage) {
 
   // Synthesis section at top
   html += '<div class="synthesis-section">';
-  if (synthesisData) {
+  const synth = synthesisData[1];
+  if (synth) {
     html += `
       <div class="synthesis-card">
         <div class="synthesis-header">
           <h4>Synthesis — Key Takeaways</h4>
-          <button class="btn btn-sm" onclick="runSynthesis()">Re-synthesize</button>
+          <button class="btn btn-sm" onclick="runSynthesis(1)">Re-synthesize</button>
         </div>
-        <div class="synthesis-content">${renderMarkdown(synthesisData.content)}</div>
+        <div class="synthesis-content">${renderMarkdown(synth.content)}</div>
       </div>`;
   } else {
     html += `
       <div class="synthesis-card synthesis-empty">
         <p>${expertCount} expert outputs ready for synthesis</p>
-        <button class="btn btn-primary" onclick="runSynthesis()" id="btn-synth">Generate Synthesis</button>
+        <button class="btn btn-primary" onclick="runSynthesis(1)" id="btn-synth">Generate Synthesis</button>
       </div>`;
   }
   html += '</div>';
@@ -935,16 +975,17 @@ function renderArtifactList(stage) {
   return html + '</ul>';
 }
 
-async function runSynthesis() {
+async function runSynthesis(stage = 1) {
   const btn = document.getElementById('btn-synth');
   if (btn) { btn.disabled = true; btn.textContent = 'Synthesizing...'; }
   showToast('Running synthesis...');
   try {
-    const res = await fetch('/api/council/synthesize', { method: 'POST' });
+    const res = await fetch(`/api/council/synthesize?stage=${stage}`, { method: 'POST' });
     const data = await res.json();
     if (data.ok) {
-      synthesisData = data.synthesis;
-      showToast('Synthesis complete');
+      synthesisData[stage] = data.synthesis;
+      if (data.briefs) wbBriefs = data.briefs;
+      showToast('Synthesis complete' + (data.briefs ? ' — briefs extracted' : ''));
       render();
     } else {
       showToast(`Error: ${data.error}`);
@@ -954,6 +995,30 @@ async function runSynthesis() {
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Generate Synthesis'; }
   }
+}
+
+async function synthesizePhase(phaseId) {
+  const btn = document.getElementById(`btn-synth-${phaseId}`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Synthesizing...'; }
+  const stg = selectedStage || 1;
+  showToast(`Synthesizing ${phaseId} phase...`);
+  try {
+    const res = await fetch(`/api/council/synthesize-phase?phase_id=${phaseId}&stage=${stg}`, { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      showToast(`${phaseId} synthesis complete`);
+      // Open the synthesis in a modal
+      const modal = document.createElement('div');
+      modal.className = 'expert-modal-overlay';
+      modal.onclick = e => { if (e.target === modal) modal.remove(); };
+      modal.innerHTML = `<div class="expert-modal" style="max-width:750px">
+        <div class="modal-header"><h3>${data.synthesis.phase_name} — Synthesis</h3><button class="modal-close" onclick="this.closest('.expert-modal-overlay').remove()">×</button></div>
+        <div class="modal-body"><div class="synthesis-content">${renderMarkdown(data.synthesis.content)}</div></div>
+      </div>`;
+      document.body.appendChild(modal);
+    } else showToast(`Error: ${data.error}`);
+  } catch (e) { showToast(`Error: ${e.message}`); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = 'Synthesize'; } }
 }
 
 function renderExpertOutputs(outputs) {
@@ -1436,6 +1501,266 @@ async function approvePhase(phaseId) {
 
 // ── Worldbuilding / Production ──────────────────────────────
 
+// ── Worldbuilding panels ───────────────────────────────────
+
+function renderWBSynthesisPanel(stage) {
+  const synth = synthesisData[2];
+  const expertCount = Object.entries(expertResults).filter(([id]) => {
+    const phases = getCouncilPhases(2);
+    return phases.some(p => p.experts.some(e => e.id === id));
+  }).length;
+
+  let html = '<div class="wb-panel">';
+  html += '<div class="wb-panel-header"><h4>Worldbuilding Synthesis</h4><p>Consolidate council outputs into production-ready briefs for characters, environments, and style.</p></div>';
+
+  if (synth) {
+    html += `
+      <div class="synthesis-card">
+        <div class="synthesis-header">
+          <h4>Production Briefs</h4>
+          <span class="synthesis-meta">${synth.expert_count} experts · ${new Date(synth.timestamp).toLocaleString()}</span>
+          <button class="btn btn-sm" onclick="runSynthesis(2)">Re-synthesize</button>
+        </div>
+        <div class="synthesis-content">${renderMarkdown(synth.content)}</div>
+      </div>`;
+  } else if (expertCount > 0) {
+    html += `
+      <div class="synthesis-card synthesis-empty">
+        <p>${expertCount} expert outputs ready for synthesis</p>
+        <p class="wb-hint">This will generate character briefs, environment specs, a style guide, and bridge points — all production-ready.</p>
+        <button class="btn btn-primary" onclick="runSynthesis(2)" id="btn-synth">Generate Production Briefs</button>
+      </div>`;
+  } else {
+    html += '<div class="empty-state"><div class="empty-icon">📝</div><p>Run the council first to generate expert outputs, then synthesize them into production briefs.</p></div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function renderWBCharactersPanel(stage) {
+  const charArtifacts = stage.artifacts.filter(a => a.type === 'character_profile');
+  const chars = wbBriefs?.characters || [];
+  const charPhase = getCouncilPhases(2).find(p => p.id === 'characters');
+
+  let html = '<div class="wb-panel">';
+  html += '<div class="wb-panel-header"><h4>Characters</h4><p>Run character experts, then generate visual reference sheets.</p></div>';
+
+  // Embedded characters phase
+  if (charPhase) {
+    html += renderPhaseBlock(charPhase, true);
+  }
+
+  // Pre-populated generation cards from briefs
+  if (chars.length > 0) {
+    html += '<div class="wb-gen-cards">';
+    chars.forEach((ch, i) => {
+      const existing = charArtifacts.find(a => a.content?.name === ch.name);
+      const hasImages = existing && (existing.content?.views?.length || existing.content?.images?.length);
+      const images = existing ? (existing.content?.views || existing.content?.images || []) : [];
+      html += `<div class="wb-gen-card ${hasImages ? 'has-result' : ''}">
+        <div class="wb-gen-card-header">
+          <span class="wb-gen-card-name">${escapeHtml(ch.name)}</span>
+          <span class="wb-gen-card-role">${escapeHtml(ch.role || '')}</span>
+        </div>
+        <p class="wb-gen-card-desc">${escapeHtml(ch.description || '')}</p>
+        <div class="form-group"><label>Name</label><input id="ch-name-${i}" type="text" value="${escapeAttr(ch.name)}"></div>
+        <div class="form-group"><label>Visual Prompt</label><textarea id="ch-desc-${i}" rows="3">${escapeHtml(ch.visual_prompt || ch.description || '')}</textarea></div>
+        <div class="form-group"><label>Style</label><input id="ch-style-${i}" type="text" value="${escapeAttr(ch.style_prompt || 'grounded sci-fi, organic materials, warm palette')}"></div>
+        <button class="btn btn-primary btn-sm" onclick="generateCharacterFromCard(${i})" id="btn-ch-${i}">${hasImages ? 'Re-generate' : 'Generate'}</button>
+        ${hasImages ? `<div class="wb-gen-card-images">${renderImageGrid(images)}</div>
+          <div class="artifact-actions" style="padding:0.5rem;display:flex;gap:0.5rem;justify-content:center;">
+            <button class="btn btn-sm btn-approve" onclick="updateArtifact(2,'${existing._filename}','approve')">✓ Approve</button>
+            <button class="btn btn-sm btn-reject" onclick="updateArtifact(2,'${existing._filename}','reject')">✕ Reject</button>
+          </div>` : ''}
+      </div>`;
+    });
+    html += '</div>';
+  } else if (synthesisData[2]) {
+    html += `<div class="synthesis-card synthesis-empty">
+      <p>Synthesis exists but no structured briefs extracted yet.</p>
+      <button class="btn btn-primary" onclick="extractBriefs()" id="btn-extract-briefs">Extract Character & Environment Briefs</button>
+    </div>`;
+  } else {
+    html += '<div class="empty-state"><div class="empty-icon">👤</div><p>Run the council and synthesis first to generate character briefs.</p></div>';
+  }
+
+  // Manual add section
+  html += `<details class="wb-manual-section"><summary>Add character manually</summary>
+    <div class="wb-generate-section" style="margin-top:0.5rem">
+      <div class="form-group"><label>Name</label><input id="ch-name" type="text" placeholder="e.g. Kael"></div>
+      <div class="form-group"><label>Description</label><textarea id="ch-desc" rows="3" placeholder="Young scientist with warm brown skin..."></textarea></div>
+      <div class="form-group"><label>Style</label><input id="ch-style" type="text" value="grounded sci-fi, organic materials, warm palette"></div>
+      <button class="btn btn-primary" onclick="generateCharacter()" id="btn-ch">Generate Character Sheet</button>
+    </div>
+  </details>`;
+
+  html += '</div>';
+  return html;
+}
+
+function renderWBEnvironmentsPanel(stage) {
+  const envArtifacts = stage.artifacts.filter(a => a.type === 'environment_spec');
+  const envs = wbBriefs?.environments || [];
+  const envPhase = getCouncilPhases(2).find(p => p.id === 'environments');
+
+  let html = '<div class="wb-panel">';
+  html += '<div class="wb-panel-header"><h4>Environments</h4><p>Run environment experts, then generate visual references.</p></div>';
+
+  // Embedded environments phase
+  if (envPhase) {
+    html += renderPhaseBlock(envPhase, true);
+  }
+
+  // Pre-populated generation cards from briefs
+  if (envs.length > 0) {
+    html += '<div class="wb-gen-cards">';
+    envs.forEach((env, i) => {
+      const existing = envArtifacts.find(a => a.content?.name === env.name);
+      const hasImages = existing && existing.content?.images?.length;
+      const images = existing ? (existing.content?.images || []) : [];
+      html += `<div class="wb-gen-card ${hasImages ? 'has-result' : ''}">
+        <div class="wb-gen-card-header">
+          <span class="wb-gen-card-name">${escapeHtml(env.name)}</span>
+          <span class="wb-gen-card-role">${escapeHtml(env.function || '')}</span>
+        </div>
+        <p class="wb-gen-card-desc">${escapeHtml(env.description || '')}</p>
+        <div class="form-group"><label>Name</label><input id="env-name-${i}" type="text" value="${escapeAttr(env.name)}"></div>
+        <div class="form-group"><label>Visual Prompt</label><textarea id="env-desc-${i}" rows="3">${escapeHtml(env.visual_prompt || env.description || '')}</textarea></div>
+        <div class="form-group"><label>Style</label><input id="env-style-${i}" type="text" value="${escapeAttr(env.style_prompt || 'grounded sci-fi, organic architecture, golden hour')}"></div>
+        <button class="btn btn-primary btn-sm" onclick="generateEnvironmentFromCard(${i})" id="btn-env-${i}">${hasImages ? 'Re-generate' : 'Generate'}</button>
+        ${hasImages ? `<div class="wb-gen-card-images">${renderImageGrid(images)}</div>
+          <div class="artifact-actions" style="padding:0.5rem;display:flex;gap:0.5rem;justify-content:center;">
+            <button class="btn btn-sm btn-approve" onclick="updateArtifact(2,'${existing._filename}','approve')">✓ Approve</button>
+            <button class="btn btn-sm btn-reject" onclick="updateArtifact(2,'${existing._filename}','reject')">✕ Reject</button>
+          </div>` : ''}
+      </div>`;
+    });
+    html += '</div>';
+  } else if (synthesisData[2]) {
+    html += `<div class="synthesis-card synthesis-empty">
+      <p>Synthesis exists but no structured briefs extracted yet.</p>
+      <button class="btn btn-primary" onclick="extractBriefs()" id="btn-extract-briefs">Extract Character & Environment Briefs</button>
+    </div>`;
+  } else {
+    html += '<div class="empty-state"><div class="empty-icon">🏛</div><p>Run the council and synthesis first to generate environment briefs.</p></div>';
+  }
+
+  // Manual add section
+  html += `<details class="wb-manual-section"><summary>Add environment manually</summary>
+    <div class="wb-generate-section" style="margin-top:0.5rem">
+      <div class="form-group"><label>Name</label><input id="env-name" type="text" placeholder="e.g. The Commons"></div>
+      <div class="form-group"><label>Description</label><textarea id="env-desc" rows="3" placeholder="A vast open atrium..."></textarea></div>
+      <div class="form-group"><label>Style</label><input id="env-style" type="text" value="grounded sci-fi, organic architecture, golden hour"></div>
+      <button class="btn btn-primary" onclick="generateEnvironment()" id="btn-env">Generate Environment</button>
+    </div>
+  </details>`;
+
+  html += '</div>';
+  return html;
+}
+
+function renderWBStyleGuidePanel(stage) {
+  const synth = synthesisData[2];
+  const style = wbBriefs?.style;
+  const styleArtifacts = stage.artifacts.filter(a => a.type === 'concept' || a.type === 'style_guide');
+
+  let html = '<div class="wb-panel">';
+  html += '<div class="wb-panel-header"><h4>Style Guide</h4><p>The visual DNA of this world — color palette, materials, lighting, technology aesthetic.</p></div>';
+
+  // Structured style from briefs
+  if (style) {
+    // Color palette
+    if (style.palette && style.palette.length > 0) {
+      html += `<div class="wb-briefs-section">
+        <div class="wb-briefs-header"><h5>Color Palette</h5></div>
+        <div class="wb-palette">${style.palette.map(c =>
+          `<div class="wb-palette-swatch">
+            <div class="wb-swatch-color" style="background:${c.hex}"></div>
+            <span class="wb-swatch-name">${escapeHtml(c.name)}</span>
+            <span class="wb-swatch-hex">${c.hex}</span>
+            <span class="wb-swatch-usage">${escapeHtml(c.usage || '')}</span>
+          </div>`
+        ).join('')}</div>
+      </div>`;
+    }
+
+    // Aesthetic, lighting, materials
+    const sections = [
+      { key: 'aesthetic', label: 'Aesthetic Direction' },
+      { key: 'lighting', label: 'Lighting Philosophy' },
+      { key: 'materials', label: 'Materials & Textures' },
+    ];
+    sections.forEach(s => {
+      if (style[s.key]) {
+        html += `<div class="wb-briefs-section">
+          <div class="wb-briefs-header"><h5>${s.label}</h5></div>
+          <div class="wb-briefs-content"><p>${escapeHtml(style[s.key])}</p></div>
+        </div>`;
+      }
+    });
+  }
+
+  // Fallback to synthesis markdown
+  if (!style && synth && synth.content) {
+    const styleMatch = synth.content.match(/## Visual Style Guide\n([\s\S]*?)(?=\n## |$)/);
+    if (styleMatch) {
+      html += `<div class="wb-briefs-section">
+        <div class="wb-briefs-header"><h5>From Synthesis</h5></div>
+        <div class="wb-briefs-content">${renderMarkdown(styleMatch[1].trim())}</div>
+      </div>`;
+    }
+  }
+
+  // The Bridge section
+  if (synth && synth.content) {
+    const bridgeMatch = synth.content.match(/## The Bridge\n([\s\S]*?)(?=\n## |$)/);
+    if (bridgeMatch) {
+      html += `<div class="wb-briefs-section">
+        <div class="wb-briefs-header"><h5>The Bridge — Today → This World</h5></div>
+        <div class="wb-briefs-content">${renderMarkdown(bridgeMatch[1].trim())}</div>
+      </div>`;
+    }
+  }
+
+  // Freeform generation for style exploration
+  html += `<div class="wb-generate-section">
+    <h5>Generate Style Reference</h5>
+    <div class="form-group"><label>Prompt</label><textarea id="ff-prompt" rows="3" placeholder="Color palette reference: warm organic architecture with golden hour light..."></textarea></div>
+    <div class="form-row">
+      <div class="form-group half"><label>Width</label><input id="ff-w" type="number" value="1024"></div>
+      <div class="form-group half"><label>Height</label><input id="ff-h" type="number" value="1024"></div>
+      <div class="form-group half"><label>Results</label><input id="ff-n" type="number" value="2" min="1" max="4"></div>
+    </div>
+    <div class="form-group"><label>Label</label><input id="ff-label" type="text" placeholder="Style reference — warm palette"></div>
+    <button class="btn btn-primary" onclick="generateFreeform()" id="btn-ff">Generate</button>
+  </div>`;
+
+  // Existing style artifacts
+  if (styleArtifacts.length > 0) {
+    html += '<div class="wb-artifacts-section"><h5>Style References</h5><div class="wb-artifact-grid">';
+    styleArtifacts.forEach(a => {
+      const images = a.content?.images || [];
+      const label = a.content?.label || 'Style Reference';
+      html += `<div class="wb-artifact-card">
+        <div class="wb-artifact-card-header">
+          <span class="wb-artifact-name">${escapeHtml(label)}</span>
+          <div class="artifact-actions">
+            <button class="btn btn-sm btn-approve" onclick="updateArtifact(2,'${a._filename}','approve')">✓</button>
+            <button class="btn btn-sm" onclick="deleteArtifact(2,'${a._filename}')" style="color:var(--text-muted)">🗑</button>
+          </div>
+        </div>
+        ${images.length > 0 ? renderImageGrid(images) : ''}
+        <span class="status-badge status-${a.approval}">${a.approval}</span>
+      </div>`;
+    });
+    html += '</div></div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
 function renderWorldbuildingGenerate() {
   return `<div class="generate-panel">
     <div class="generate-tabs">
@@ -1525,6 +1850,48 @@ async function generateShot() {
     const data = await res.json();
     if (data.ok) { showToast('Shot generated'); activeTab='artifacts'; await fetchPipeline(); } else showToast(`Error: ${data.error}`);
   } finally { btn.disabled = false; btn.textContent = 'Generate Shot'; }
+}
+
+async function generateCharacterFromCard(index) {
+  const btn = document.getElementById(`btn-ch-${index}`); btn.disabled = true; btn.textContent = 'Generating...';
+  try {
+    const name = document.getElementById(`ch-name-${index}`).value;
+    const desc = document.getElementById(`ch-desc-${index}`).value;
+    const style = document.getElementById(`ch-style-${index}`).value;
+    const res = await fetch('/api/generate/character', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, description: desc, style_prompt: style }) });
+    const data = await res.json();
+    if (data.ok) { showToast(`${name} generated`); await fetchPipeline(); } else showToast(`Error: ${data.error}`);
+  } finally { btn.disabled = false; btn.textContent = 'Generate'; }
+}
+
+async function generateEnvironmentFromCard(index) {
+  const btn = document.getElementById(`btn-env-${index}`); btn.disabled = true; btn.textContent = 'Generating...';
+  try {
+    const name = document.getElementById(`env-name-${index}`).value;
+    const desc = document.getElementById(`env-desc-${index}`).value;
+    const style = document.getElementById(`env-style-${index}`).value;
+    const res = await fetch('/api/generate/environment', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, description: desc, style_prompt: style }) });
+    const data = await res.json();
+    if (data.ok) { showToast(`${name} generated`); await fetchPipeline(); } else showToast(`Error: ${data.error}`);
+  } finally { btn.disabled = false; btn.textContent = 'Generate'; }
+}
+
+async function extractBriefs() {
+  const btn = document.getElementById('btn-extract-briefs');
+  if (btn) { btn.disabled = true; btn.textContent = 'Extracting...'; }
+  showToast('Extracting structured briefs from synthesis...');
+  try {
+    const res = await fetch('/api/council/briefs/extract?stage=2', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      wbBriefs = data.briefs;
+      const cc = data.briefs?.characters?.length || 0;
+      const ec = data.briefs?.environments?.length || 0;
+      showToast(`Extracted ${cc} characters, ${ec} environments`);
+      render();
+    } else showToast(`Error: ${data.error}`);
+  } catch (e) { showToast(`Error: ${e.message}`); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = 'Extract Briefs'; } }
 }
 
 // ── Artifact actions ────────────────────────────────────────

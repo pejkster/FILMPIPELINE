@@ -472,10 +472,62 @@ async def get_expert_chat(expert_id: str):
 
 # ── Council: synthesize results ───────────────────────────────
 
+SYNTHESIS_PROMPTS = {
+    1: """You are a synthesis expert. You receive research outputs from multiple domain experts about a hopeful future for humanity.
+
+Produce a clear, structured synthesis with:
+1. **Top 5 Key Takeaways** — the most important cross-cutting insights
+2. **Common Themes** — patterns that appear across multiple experts
+3. **Tensions & Trade-offs** — where experts disagree or identify competing priorities
+4. **Strongest Visual Opportunities** — the most cinematic moments suggested across all experts
+5. **Recommended Focus Areas** — what the film should prioritize given all inputs
+
+Be concise and specific. This is for a 3-minute cinematic trailer about an abundant future.""",
+
+    2: """You are a worldbuilding synthesis expert. You receive outputs from world design experts who have built the rules, characters, environments, and sensory reality of a near-future world.
+
+Your job is to distill their work into **production-ready briefs** that downstream visual artists can act on directly.
+
+Produce a structured synthesis with these exact sections:
+
+## World Summary
+A single-paragraph description of this world — its core identity, what makes it feel real, what makes it feel different from today.
+
+## Character Briefs
+For each major character the experts defined:
+- **Name & Role** — who they are in the story
+- **Visual Description** — age, build, face, hair, skin tone, distinguishing features (be specific enough for image generation)
+- **Wardrobe** — what they wear, materials, colors, style (everyday + any special outfits)
+- **Emotional Register** — how they carry themselves, default expression, body language
+- **Key Props** — objects they interact with
+
+## Environment Briefs
+For each key location the experts defined:
+- **Name & Function** — what this place is and what happens here
+- **Spatial Description** — scale, layout, key architectural features
+- **Materials & Surfaces** — what it's made of, textures, how light interacts with surfaces
+- **Time of Day & Lighting** — default lighting mood, color temperature
+- **Atmosphere** — sounds, smells, temperature, how it feels to be there
+- **Camera Opportunities** — the 2-3 most cinematic angles or moments in this space
+
+## Visual Style Guide
+- **Color Palette** — 5-7 primary colors with hex codes and where each is used
+- **Material Language** — the dominant materials and textures (organic tech, wood+light, etc.)
+- **Lighting Philosophy** — how light behaves in this world, golden hour vs cool blue, natural vs artificial
+- **Technology Aesthetic** — how tech looks and feels, what it's made of, how people interact with it
+- **Typography & Signage** — if text appears in-world, what does it look like
+
+## The Bridge
+3-5 visual moments that show the connection from today to this world — what the audience can recognize from their own life, transformed.
+
+Be extremely specific and visual. Every description should be concrete enough that an image generation model could act on it.""",
+}
+
+
 @app.post("/api/council/synthesize")
-async def synthesize_results():
-    """Run an LLM call to synthesize all expert outputs into key takeaways."""
-    results_dir = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts"
+async def synthesize_results(stage: int = 1):
+    """Run an LLM call to synthesize all expert outputs into production-ready briefs."""
+    results_dir = PIPELINE_ROOT / STAGE_DIRS.get(stage, STAGE_DIRS[1]) / "outputs" / "experts"
     if not results_dir.exists():
         return JSONResponse({"error": "No expert results to synthesize"}, status_code=400)
 
@@ -490,29 +542,149 @@ async def synthesize_results():
         return JSONResponse({"error": "No expert results to synthesize"}, status_code=400)
 
     combined = "\n\n---\n\n".join(expert_texts)
-
-    system_prompt = """You are a synthesis expert. You receive research outputs from multiple domain experts about a hopeful future for humanity.
-
-Produce a clear, structured synthesis with:
-1. **Top 5 Key Takeaways** — the most important cross-cutting insights
-2. **Common Themes** — patterns that appear across multiple experts
-3. **Tensions & Trade-offs** — where experts disagree or identify competing priorities
-4. **Strongest Visual Opportunities** — the most cinematic moments suggested across all experts
-5. **Recommended Focus Areas** — what the film should prioritize given all inputs
-
-Be concise and specific. This is for a 3-minute cinematic trailer about an abundant future."""
+    system_prompt = SYNTHESIS_PROMPTS.get(stage, SYNTHESIS_PROMPTS[1])
 
     import importlib
     council_mod = importlib.import_module("pipeline.01_llm_council.council")
-    council = council_mod.LLMCouncil()
+    council = council_mod.LLMCouncil(stage=stage)
     try:
-        result = await council._call_llm(system_prompt, f"Synthesize these expert research outputs:\n\n{combined}")
-        # Save synthesis
+        result = await council._call_llm(system_prompt, f"Synthesize these expert outputs into production-ready briefs:\n\n{combined}")
         synth_path = results_dir / "_synthesis.json"
         synth_data = {
             "content": result,
             "timestamp": datetime.now().isoformat(),
             "expert_count": len(expert_texts),
+            "stage": stage,
+        }
+        synth_path.write_text(json.dumps(synth_data, indent=2))
+
+        # For Stage 2, auto-extract structured briefs for generation cards
+        briefs_data = None
+        if stage == 2:
+            try:
+                briefs_data = await _extract_briefs(council, result)
+                briefs_path = results_dir / "_briefs.json"
+                briefs_path.write_text(json.dumps(briefs_data, indent=2))
+            except Exception:
+                pass
+
+        resp = {"ok": True, "synthesis": synth_data}
+        if briefs_data:
+            resp["briefs"] = briefs_data
+        return JSONResponse(resp)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+BRIEFS_EXTRACTION_PROMPT = """You are extracting structured data from a worldbuilding synthesis document. Parse the synthesis and extract every character and environment into a structured JSON format that can be used directly for image generation.
+
+For characters, write a detailed visual prompt that an image generation model can use — focus on physical appearance, clothing, posture, and setting. Do NOT include abstract traits like "brave" — only what a camera would see.
+
+For environments, write a detailed scene prompt — architecture, materials, lighting, atmosphere, time of day, camera angle.
+
+For the style guide, extract the color palette and overall aesthetic direction.
+
+Return ONLY valid JSON in this exact format:
+
+```json
+{
+  "characters": [
+    {
+      "name": "Character Name",
+      "role": "Their role in the story",
+      "description": "2-3 sentence character summary for context",
+      "visual_prompt": "Detailed visual description for image generation: age, ethnicity, build, face, hair, skin, clothing materials and colors, pose, expression, setting, lighting. 50-80 words.",
+      "style_prompt": "grounded sci-fi, organic materials, warm palette, cinematic portrait"
+    }
+  ],
+  "environments": [
+    {
+      "name": "Location Name",
+      "function": "What happens here",
+      "description": "2-3 sentence location summary",
+      "visual_prompt": "Detailed scene description for image generation: architecture, materials, scale, lighting, atmosphere, time of day, camera angle, foreground/midground/background elements. 50-80 words.",
+      "style_prompt": "grounded sci-fi, organic architecture, golden hour, cinematic wide shot"
+    }
+  ],
+  "style": {
+    "palette": [
+      {"name": "color name", "hex": "#hex", "usage": "where this color appears"}
+    ],
+    "aesthetic": "One paragraph describing the overall visual aesthetic",
+    "lighting": "One paragraph on lighting philosophy",
+    "materials": "One paragraph on dominant materials and textures"
+  }
+}
+```
+
+Extract ALL characters and environments mentioned. Be thorough with visual prompts — they must be specific enough for consistent image generation."""
+
+
+async def _extract_briefs(council, synthesis_content: str) -> dict:
+    """Extract structured briefs from synthesis markdown."""
+    result = await council._call_llm(
+        BRIEFS_EXTRACTION_PROMPT,
+        f"Extract structured briefs from this synthesis:\n\n{synthesis_content}"
+    )
+    text = result.strip()
+    import re
+    match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    if match:
+        text = match.group(1)
+    return json.loads(text)
+
+
+@app.post("/api/council/synthesize-phase")
+async def synthesize_phase(phase_id: str, stage: int = 1):
+    """Synthesize outputs from a single phase."""
+    results_dir = PIPELINE_ROOT / STAGE_DIRS.get(stage, STAGE_DIRS[1]) / "outputs" / "experts"
+    if not results_dir.exists():
+        return JSONResponse({"error": "No results directory"}, status_code=400)
+
+    config = load_stage_config(stage)
+    phase_config = next((p for p in config["phases"] if p["id"] == phase_id), None)
+    if not phase_config:
+        return JSONResponse({"error": "Phase not found"}, status_code=404)
+
+    expert_ids = {e["id"] for e in phase_config["experts"]}
+    expert_texts = []
+    for path in sorted(results_dir.glob("*.json")):
+        if path.name.startswith("_"):
+            continue
+        data = json.loads(path.read_text())
+        if data.get("expert_id") in expert_ids:
+            expert_texts.append(f"## {data['role']}\n\n{data['content'][:3000]}")
+
+    if not expert_texts:
+        return JSONResponse({"error": "No expert results for this phase"}, status_code=400)
+
+    combined = "\n\n---\n\n".join(expert_texts)
+    phase_name = phase_config["name"]
+
+    system_prompt = f"""You are a synthesis expert. You receive outputs from the "{phase_name}" phase experts.
+
+Produce a clear, structured synthesis of their work:
+1. **Key Findings** — the most important insights from this phase
+2. **Common Ground** — where experts agree
+3. **Tensions** — where experts disagree or identify trade-offs
+4. **Actionable Outputs** — specific decisions, descriptions, or specs that downstream work can build on
+5. **Open Questions** — what still needs resolution
+
+Be concise and specific. Focus on what's actionable."""
+
+    import importlib
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+    council = council_mod.LLMCouncil(stage=stage)
+    try:
+        result = await council._call_llm(system_prompt, f"Synthesize these {phase_name} phase outputs:\n\n{combined}")
+        synth_path = results_dir / f"_synthesis_{phase_id}.json"
+        synth_data = {
+            "content": result,
+            "phase_id": phase_id,
+            "phase_name": phase_name,
+            "timestamp": datetime.now().isoformat(),
+            "expert_count": len(expert_texts),
+            "stage": stage,
         }
         synth_path.write_text(json.dumps(synth_data, indent=2))
         return JSONResponse({"ok": True, "synthesis": synth_data})
@@ -521,13 +693,46 @@ Be concise and specific. This is for a 3-minute cinematic trailer about an abund
 
 
 @app.get("/api/council/synthesis")
-async def get_synthesis():
+async def get_synthesis(stage: int = 1):
     """Get the saved synthesis if it exists."""
-    synth_path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / "_synthesis.json"
+    stage_dir = STAGE_DIRS.get(stage, STAGE_DIRS[1])
+    synth_path = PIPELINE_ROOT / stage_dir / "outputs" / "experts" / "_synthesis.json"
     if not synth_path.exists():
         return JSONResponse({"synthesis": None})
     data = json.loads(synth_path.read_text())
     return JSONResponse({"synthesis": data})
+
+
+@app.get("/api/council/briefs")
+async def get_briefs(stage: int = 2):
+    """Get extracted structured briefs for generation cards."""
+    stage_dir = STAGE_DIRS.get(stage, STAGE_DIRS[2])
+    briefs_path = PIPELINE_ROOT / stage_dir / "outputs" / "experts" / "_briefs.json"
+    if not briefs_path.exists():
+        return JSONResponse({"briefs": None})
+    data = json.loads(briefs_path.read_text())
+    return JSONResponse({"briefs": data})
+
+
+@app.post("/api/council/briefs/extract")
+async def extract_briefs_from_synthesis(stage: int = 2):
+    """Re-extract structured briefs from existing synthesis."""
+    stage_dir = STAGE_DIRS.get(stage, STAGE_DIRS[stage])
+    synth_path = PIPELINE_ROOT / stage_dir / "outputs" / "experts" / "_synthesis.json"
+    if not synth_path.exists():
+        return JSONResponse({"error": "No synthesis found"}, status_code=400)
+
+    synth = json.loads(synth_path.read_text())
+    import importlib
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+    council = council_mod.LLMCouncil(stage=stage)
+    try:
+        briefs = await _extract_briefs(council, synth["content"])
+        briefs_path = PIPELINE_ROOT / stage_dir / "outputs" / "experts" / "_briefs.json"
+        briefs_path.write_text(json.dumps(briefs, indent=2))
+        return JSONResponse({"ok": True, "briefs": briefs})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 # ── Council: phases ──────────────────────────────────────────
@@ -1081,6 +1286,7 @@ async def _run_council_background(job_id: str, phase_id: str | None, stage: int 
     job = jobs[job_id]
     try:
         council = council_mod.LLMCouncil(stage=stage)
+        council._load_prior_outputs()
 
         phases_to_run = council.phases
         if phase_id:

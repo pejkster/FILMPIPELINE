@@ -15,12 +15,12 @@ load_dotenv()
 FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 COUNCIL_MODELS = [
-    {"id": "anthropic-claude-opus-4-8", "name": "Claude Opus 4.8", "lab": "Anthropic"},
-    {"id": "openai-gpt-5-5", "name": "GPT-5.5", "lab": "OpenAI"},
-    {"id": "google-gemini-3-1-pro", "name": "Gemini 3.1 Pro", "lab": "Google"},
-    {"id": "xai-grok-4-3", "name": "Grok 4.3", "lab": "xAI"},
-    {"id": "alibaba-qwen3-5-397b", "name": "Qwen 3.5 397B", "lab": "Alibaba"},
-    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "lab": "DeepSeek"},
+    {"id": "anthropic-claude-opus-4-8", "name": "Claude Opus 4.8", "lab": "Anthropic", "thinking": "off"},
+    {"id": "openai-gpt-5-5", "name": "GPT-5.5", "lab": "OpenAI", "thinking": "off"},
+    {"id": "google-gemini-3-1-pro", "name": "Gemini 3.1 Pro", "lab": "Google", "thinking": "low"},
+    {"id": "xai-grok-4-3", "name": "Grok 4.3", "lab": "xAI", "thinking": "off"},
+    {"id": "alibaba-qwen3-235b", "name": "Qwen 3 235B", "lab": "Alibaba", "thinking": "off"},
+    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "lab": "DeepSeek", "thinking": "off"},
 ]
 
 LABELS = ["A", "B", "C", "D", "E"]
@@ -125,7 +125,7 @@ def parse_json_response(text: str):
     return json.loads(text)
 
 
-async def _call_model(model_id: str, user_message: str, system_prompt: str = "") -> str:
+async def _call_model(model_id: str, user_message: str, system_prompt: str = "", thinking_level: str = "off") -> str:
     """Call a model via Runware text inference. Each call gets its own connection."""
     api_key = os.getenv("RUNWARE_API_KEY")
     if not api_key:
@@ -136,7 +136,7 @@ async def _call_model(model_id: str, user_message: str, system_prompt: str = "")
 
     settings = {
         "maxTokens": 4096,
-        "thinkingLevel": "off",
+        "thinkingLevel": thinking_level,
     }
     if system_prompt:
         settings["systemPrompt"] = system_prompt
@@ -191,7 +191,7 @@ async def run_feedback_loop(
         async def _call(m=model):
             emit(f"  {m['name']} generating statement...", level="start")
             try:
-                text = await _call_model(m["id"], round1_prompt)
+                text = await _call_model(m["id"], round1_prompt, thinking_level=m.get("thinking", "none"))
                 emit(f"  {m['name']} done ({len(text)} chars)", level="done")
                 return m["id"], m["name"], text
             except Exception as e:
@@ -247,7 +247,7 @@ async def run_feedback_loop(
             async def _feedback(m=reviewer_model, p=prompt, lm=label_map):
                 emit(f"  {m['name']} reviewing peers...", level="start")
                 try:
-                    resp = await _call_model(m["id"], p)
+                    resp = await _call_model(m["id"], p, thinking_level=m.get("thinking", "none"))
                     reviews = parse_json_response(resp)
                     mapped = []
                     for review in reviews:
@@ -309,7 +309,7 @@ async def run_feedback_loop(
             async def _revise(m=rev_model, p=prompt):
                 emit(f"  {m['name']} considering revision...", level="start")
                 try:
-                    resp = await _call_model(m["id"], p)
+                    resp = await _call_model(m["id"], p, thinking_level=m.get("thinking", "none"))
                     rev = parse_json_response(resp)
                     score = rev.get("revision_score", 0)
                     label = ["unchanged", "minor revision", "MAJOR revision"][score]
@@ -363,7 +363,7 @@ async def run_feedback_loop(
     )
 
     try:
-        analysis_resp = await _call_model(COUNCIL_MODELS[0]["id"], analysis_prompt)
+        analysis_resp = await _call_model(COUNCIL_MODELS[0]["id"], analysis_prompt, thinking_level=COUNCIL_MODELS[0].get("thinking", "none"))
         analysis = parse_json_response(analysis_resp)
         result["analysis"] = analysis
         emit("Analysis complete", level="done")

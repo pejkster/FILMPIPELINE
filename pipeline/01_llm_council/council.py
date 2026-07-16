@@ -129,6 +129,8 @@ class LLMCouncil:
     CONTEXT_LEVELS = ["none", "basic", "futurax", "disordine"]
 
     def _load_prompt(self, prompt_file: str) -> str:
+        if not prompt_file:
+            return ""
         path = self.stage_root / prompt_file
         if not path.exists():
             path = COUNCIL_ROOT / prompt_file
