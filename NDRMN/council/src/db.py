@@ -94,6 +94,22 @@ def get_latest_round(conn, run_id, topic_id):
     return row["latest"]
 
 
+def get_final_statements_for_topic_across_runs(conn, run_ids, topic_id, models):
+    """Returns a list of (run_id, model, statement_row) for every model's final
+    statement on this topic, across all given runs."""
+    results = []
+    for run_id in run_ids:
+        latest = get_latest_round(conn, run_id, topic_id)
+        if latest is None:
+            continue
+        statements = get_statements_for_round(conn, run_id, topic_id, latest)
+        for model in models:
+            stmt = statements.get(model["id"])
+            if stmt is not None:
+                results.append((run_id, model, stmt))
+    return results
+
+
 def get_statement(conn, run_id, model_id, topic_id, round_):
     return conn.execute(
         "SELECT * FROM statements WHERE run_id = ? AND model_id = ? AND topic_id = ? AND round = ?",

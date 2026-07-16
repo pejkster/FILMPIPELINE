@@ -7,6 +7,8 @@ _FILES = {
     "feedback": "feedback_prompt.md",
     "revision": "model_revision_prompt.md",
     "analysis": "analysis_prompt.md",
+    "outlook_extraction": "outlook_extraction_prompt.md",
+    "outlook_writing": "outlook_writing_prompt.md",
 }
 
 _MARKER = "## Prompt text"
