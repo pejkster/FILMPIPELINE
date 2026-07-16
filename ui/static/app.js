@@ -227,6 +227,13 @@ function renderCouncilPanel() {
           </select>
           <button class="btn-icon" onclick="event.stopPropagation(); previewContext('${phase.context_level || 'none'}')" title="Preview context preamble">👁</button>
         </div>
+        ${selectedStage > 1 ? `<div class="phase-mode-bar">
+          <span class="phase-mode-label">Stage 1 Context:</span>
+          <button class="prior-context-toggle ${phase.include_prior_stage_context ? 'active' : ''}" onclick="event.stopPropagation(); togglePriorContext('${phase.id}', ${!phase.include_prior_stage_context})">
+            ${phase.include_prior_stage_context ? '✓ Included' : '✗ Off'}
+          </button>
+          <span class="phase-mode-desc">Feed outputs from previous stage into this phase's experts</span>
+        </div>` : ''}
         <div class="phase-experts-drop" ondragover="event.preventDefault(); this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="dropToPhase(event, '${phase.id}', this)">
           ${phase.experts.map(e => {
             const done = !!expertResults[e.id];
@@ -1074,6 +1081,20 @@ async function setContextLevel(phaseId, level) {
     const data = await res.json();
     if (data.ok) {
       showToast(`${phaseId} context → ${level}`);
+      await fetchPipeline();
+    } else showToast(`Error: ${data.error}`);
+  } catch (e) { showToast(`Error: ${e.message}`); }
+}
+
+async function togglePriorContext(phaseId, enabled) {
+  try {
+    const stg = selectedStage || 1;
+    const res = await fetch(`/api/council/phase/${phaseId}/prior-context?stage=${stg}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showToast(`${phaseId} prior stage context → ${enabled ? 'ON' : 'OFF'}`);
       await fetchPipeline();
     } else showToast(`Error: ${data.error}`);
   } catch (e) { showToast(`Error: ${e.message}`); }

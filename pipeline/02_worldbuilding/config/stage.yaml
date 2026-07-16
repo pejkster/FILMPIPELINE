@@ -1,94 +1,116 @@
 stage: 2
-name: "Worldbuilding"
-description: "Translate vision into a lived-in world with characters, environments, and sensory reality"
-
-inputs_from: [1]
-
+name: Worldbuilding
+description: Translate vision into a lived-in world with characters, environments,
+  and sensory reality
+inputs_from:
+- 1
+include_prior_stage_context: true
 llm:
-  provider: "runware"
-  model: "anthropic-claude-opus-4-7"
+  provider: runware
+  model: anthropic-claude-opus-4-7
   max_tokens: 4096
-
 phases:
-  - id: worldbuilding
-    name: "World Design"
-    description: "Build the world bible, rules, technology, and social structures"
-    mode: parallel
-    context_level: futurax
-    checkpoint: true
-    experts:
-      - id: world_bible_producer
-        role: "World Bible Producer"
-        prompt_file: "prompts/experts/world_bible_producer.md"
-      - id: transition_historian
-        role: "Transition Historian"
-        prompt_file: "prompts/experts/transition_historian.md"
-      - id: skeptic_wb
-        role: "Skeptic / Red Team"
-        prompt_file: "prompts/experts/skeptic.md"
-
-  - id: characters
-    name: "Characters & Culture"
-    description: "Design characters, their psychology, relationships, and cultural context"
-    mode: parallel
-    context_level: futurax
-    checkpoint: true
-    experts:
-      - id: character_architect
-        role: "Character Architect"
-        prompt_file: "prompts/experts/character_architect.md"
-      - id: anthropologist_wb
-        role: "Cultural Anthropologist"
-        prompt_file: "prompts/experts/anthropologist.md"
-
-  - id: environments
-    name: "Environments & Senses"
-    description: "Design key locations and the sensory palette of the world"
-    mode: parallel
-    context_level: futurax
-    checkpoint: true
-    experts:
-      - id: environment_designer
-        role: "Environment Designer"
-        prompt_file: "prompts/experts/environment_designer.md"
-      - id: sensory_designer
-        role: "Sensory Designer"
-        prompt_file: "prompts/experts/sensory_designer.md"
-
+- id: worldbuilding
+  name: World Design
+  description: Consolidate the brief and Disordine universe, then build the world
+    bible
+  mode: parallel
+  context_level: disordine
+  include_prior_stage_context: true
+  checkpoint: true
+  experts:
+  - id: vision_consolidator
+    role: Vision Consolidator
+    prompt_file: prompts/experts/vision_consolidator.md
+  - id: world_bible_producer
+    role: World Bible Producer
+    prompt_file: prompts/experts/world_bible_producer.md
+  - id: transition_historian
+    role: Transition Historian
+    prompt_file: prompts/experts/transition_historian.md
+  - id: lore_keeper_wb
+    role: Lore Keeper / Continuity Editor
+    prompt_file: prompts/experts/lore_keeper.md
+  - id: skeptic_wb
+    role: Skeptic / Red Team
+    prompt_file: prompts/experts/skeptic.md
+- id: characters
+  name: Characters & Culture
+  description: Design characters, daily life, relationships, and cultural context
+  mode: parallel
+  context_level: disordine
+  include_prior_stage_context: true
+  previous_phase: worldbuilding
+  checkpoint: true
+  experts:
+  - id: character_architect
+    role: Character Architect
+    prompt_file: prompts/experts/character_architect.md
+  - id: anthropologist_wb
+    role: Cultural Anthropologist
+    prompt_file: prompts/experts/anthropologist.md
+- id: environments
+  name: Environments & Senses
+  description: Design key locations, sensory palette, and visual language
+  mode: parallel
+  context_level: disordine
+  include_prior_stage_context: true
+  previous_phase: worldbuilding
+  checkpoint: true
+  experts:
+  - id: environment_designer
+    role: Environment Designer
+    prompt_file: prompts/experts/environment_designer.md
+  - id: sensory_designer
+    role: Sensory Designer
+    prompt_file: prompts/experts/sensory_designer.md
 style:
-  aesthetic: "grounded sci-fi, warm palette, organic architecture"
+  aesthetic: grounded sci-fi, warm palette, organic architecture
   references: []
   color_palette: []
-
 characters_gen:
   generation:
-    tool: "runware"
-    consistency_method: "reference_sheet"
-    views: ["front", "three_quarter", "profile"]
-
+    tool: runware
+    consistency_method: reference_sheet
+    views:
+    - front
+    - three_quarter
+    - profile
 environments_gen:
   generation:
-    tool: "runware"
-    method: "tile_and_compose"
-    layers: ["background", "midground", "foreground"]
-
+    tool: runware
+    method: tile_and_compose
+    layers:
+    - background
+    - midground
+    - foreground
 outputs:
-  - type: world_bible
-    phase: worldbuilding
-    description: "World bible, rules, technology, social structures"
-  - type: character_profiles
-    phase: characters
-    description: "Character designs, psychology, relationships"
-  - type: environment_specs
-    phase: environments
-    description: "Key locations, sensory palette, visual character"
-  - type: style_guide
-    description: "Visual style bible — colors, textures, lighting"
-  - type: character_profile
-    description: "Character reference sheets with consistent design"
-  - type: environment_spec
-    description: "Environment layouts and mood boards"
-
+- type: vision_consolidation
+  phase: worldbuilding
+  description: "Brief \xD7 Disordine alignment map, tension resolution, creative north\
+    \ star"
+- type: world_bible
+  phase: worldbuilding
+  description: "World bible \u2014 rules, technology, social structures, daily life,\
+    \ bridge from today"
+- type: lore_report
+  phase: worldbuilding
+  description: Lore consistency check and Metanoia identity anchors
+- type: character_profiles
+  phase: characters
+  description: Character profiles with motivations, daily lives, relationships
+- type: daily_life
+  phase: characters
+  description: "What a normal Tuesday looks like \u2014 morning to night in sensory\
+    \ detail"
+- type: environment_specs
+  phase: environments
+  description: 4-6 key locations with spatial logic and sensory detail
+- type: visual_language
+  phase: environments
+  description: Color palette logic, architectural style, technology aesthetic
 checkpoint:
   required: true
-  reviewers: ["nejc", "dirk"]
+  reviewers:
+  - nejc
+  - dirk

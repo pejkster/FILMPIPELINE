@@ -560,6 +560,8 @@ async def get_council_phases(stage: int = 1):
             "description": phase["description"],
             "mode": mode,
             "context_level": phase.get("context_level", "none"),
+            "include_prior_stage_context": phase.get("include_prior_stage_context",
+                config.get("include_prior_stage_context", False)),
             "checkpoint": phase["checkpoint"],
             "expert_count": len(phase["experts"]),
             "experts": [
@@ -641,6 +643,39 @@ async def set_phase_context_level(phase_id: str, req: SetContextLevelRequest, st
             with open(config_path, "w") as f:
                 yaml.dump(config, f, default_flow_style=False, sort_keys=False)
             return JSONResponse({"ok": True, "context_level": req.context_level})
+
+    return JSONResponse({"error": "Phase not found"}, status_code=404)
+
+
+# ── Council: prior stage context toggle ───────────────────
+
+@app.get("/api/council/phase/{phase_id}/prior-context")
+async def get_phase_prior_context(phase_id: str, stage: int = 1):
+    config = load_stage_config(stage)
+    stage_level = config.get("include_prior_stage_context", False)
+    for phase in config["phases"]:
+        if phase["id"] == phase_id:
+            enabled = phase.get("include_prior_stage_context", stage_level)
+            return JSONResponse({"include_prior_stage_context": enabled})
+    return JSONResponse({"error": "Phase not found"}, status_code=404)
+
+
+class SetPriorContextRequest(BaseModel):
+    enabled: bool
+
+
+@app.put("/api/council/phase/{phase_id}/prior-context")
+async def set_phase_prior_context(phase_id: str, req: SetPriorContextRequest, stage: int = 1):
+    config_path = _stage_dir(stage) / "config" / "stage.yaml"
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    for phase in config["phases"]:
+        if phase["id"] == phase_id:
+            phase["include_prior_stage_context"] = req.enabled
+            with open(config_path, "w") as f:
+                yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            return JSONResponse({"ok": True, "include_prior_stage_context": req.enabled})
 
     return JSONResponse({"error": "Phase not found"}, status_code=404)
 
@@ -1067,7 +1102,13 @@ async def _run_council_background(job_id: str, phase_id: str | None, stage: int 
                     ctx_level = pc.get("context_level", "none")
                     break
 
-            _log(job, f"Phase: {phase.name} ({len(phase.experts)} experts, mode: {phase.mode}, context: {ctx_level})", level="phase")
+            has_prior = phase.include_prior_stage_context and stage > 1
+            prior_label = f", prior stage context: {'ON' if has_prior else 'OFF'}" if stage > 1 else ""
+            _log(job, f"Phase: {phase.name} ({len(phase.experts)} experts, mode: {phase.mode}, context: {ctx_level}{prior_label})", level="phase")
+            if has_prior:
+                prior_count = sum(1 for o in council.outputs.values()
+                    if not any(o.phase_id == p.id for p in council.phases))
+                _log(job, f"Prior stage context: {prior_count} outputs loaded", level="info")
             if phase.previous_phase:
                 prev_count = sum(1 for o in council.outputs.values() if o.phase_id == phase.previous_phase)
                 _log(job, f"Context: {prev_count} outputs from {phase.previous_phase} phase", level="info")

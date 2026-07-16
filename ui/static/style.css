@@ -530,6 +530,22 @@ body {
   color: white;
 }
 
+.prior-context-toggle {
+  padding: 2px 10px;
+  border-radius: 4px;
+  border: 1px solid #2d2f3a;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.65rem;
+}
+.prior-context-toggle:hover { color: var(--text); border-color: #3a3d4a; }
+.prior-context-toggle.active {
+  background: var(--success);
+  border-color: var(--success);
+  color: white;
+}
+
 .phase-mode-desc {
   font-size: 0.6rem;
   color: var(--text-muted);

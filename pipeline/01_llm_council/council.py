@@ -36,6 +36,7 @@ class PhaseConfig:
     experts: list[ExpertConfig]
     context_level: str = "none"
     previous_phase: str | None = None
+    include_prior_stage_context: bool = False
 
 
 @dataclass
@@ -83,7 +84,7 @@ class LLMCouncil:
                 for e in p["experts"]
             ]
             mode = p.get("mode", "sequential" if not p.get("parallel", False) else "parallel")
-            prev_phase = phase_list[i - 1]["id"] if i > 0 else None
+            prev_phase = p.get("previous_phase", phase_list[i - 1]["id"] if i > 0 else None)
             phases.append(PhaseConfig(
                 id=p["id"],
                 name=p["name"],
@@ -93,6 +94,8 @@ class LLMCouncil:
                 experts=experts,
                 context_level=p.get("context_level", "none"),
                 previous_phase=prev_phase,
+                include_prior_stage_context=p.get("include_prior_stage_context",
+                    self.config.get("include_prior_stage_context", False)),
             ))
         return phases
 
@@ -172,6 +175,27 @@ class LLMCouncil:
             + "\n\n---\n\n".join(context_parts)
         )
 
+    def _build_cross_stage_context(self) -> str:
+        """Build context from all prior stage outputs (stage 1 outputs for stage 2, etc.)."""
+        prior_outputs = [
+            o for o in self.outputs.values()
+            if not any(
+                o.phase_id == p.id for p in self.phases
+            )
+        ]
+        if not prior_outputs:
+            return ""
+        context_parts = [
+            f"## {o.role} ({o.phase_id})\n\n{o.content}" for o in prior_outputs
+        ]
+        return (
+            "\n\n---\n\n"
+            "# Context from Prior Stage\n\n"
+            "The following outputs were produced by the previous stage's council. "
+            "Use this as your foundation — build upon it, don't repeat it.\n\n"
+            + "\n\n---\n\n".join(context_parts)
+        )
+
     def _build_intra_phase_context(self, expert: ExpertConfig) -> str:
         """Build context from earlier experts within the same phase (sequential mode only)."""
         context_parts = []
@@ -234,8 +258,15 @@ class LLMCouncil:
 
         system_prompt = self.build_system_prompt(expert, context_level)
 
-        # Context from previous phase (always included if available)
-        phase_context = self._build_phase_context(phase)
+        # Cross-stage context (outputs from prior stages)
+        phase_context = ""
+        if phase.include_prior_stage_context and self.stage > 1:
+            phase_context = self._build_cross_stage_context()
+
+        # Context from previous phase within this stage
+        prev_phase_ctx = self._build_phase_context(phase)
+        if prev_phase_ctx:
+            phase_context = phase_context + prev_phase_ctx if phase_context else prev_phase_ctx
 
         # Intra-phase chaining (only in sequential mode)
         if include_intra_phase and expert.receives:
