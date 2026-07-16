@@ -1,28 +1,87 @@
 stage: 2
-name: "Worldbuilding & Characters"
-description: "Visual consistency, character design, and environment specification"
+name: "Worldbuilding"
+description: "Translate vision into a lived-in world with characters, environments, and sensory reality"
 
 inputs_from: [1]
 
+llm:
+  provider: "runware"
+  model: "anthropic-claude-opus-4-7"
+  max_tokens: 4096
+
+phases:
+  - id: worldbuilding
+    name: "World Design"
+    description: "Build the world bible, rules, technology, and social structures"
+    mode: parallel
+    context_level: futurax
+    checkpoint: true
+    experts:
+      - id: world_bible_producer
+        role: "World Bible Producer"
+        prompt_file: "prompts/experts/world_bible_producer.md"
+      - id: transition_historian
+        role: "Transition Historian"
+        prompt_file: "prompts/experts/transition_historian.md"
+      - id: skeptic_wb
+        role: "Skeptic / Red Team"
+        prompt_file: "prompts/experts/skeptic.md"
+
+  - id: characters
+    name: "Characters & Culture"
+    description: "Design characters, their psychology, relationships, and cultural context"
+    mode: parallel
+    context_level: futurax
+    checkpoint: true
+    experts:
+      - id: character_architect
+        role: "Character Architect"
+        prompt_file: "prompts/experts/character_architect.md"
+      - id: anthropologist_wb
+        role: "Cultural Anthropologist"
+        prompt_file: "prompts/experts/anthropologist.md"
+
+  - id: environments
+    name: "Environments & Senses"
+    description: "Design key locations and the sensory palette of the world"
+    mode: parallel
+    context_level: futurax
+    checkpoint: true
+    experts:
+      - id: environment_designer
+        role: "Environment Designer"
+        prompt_file: "prompts/experts/environment_designer.md"
+      - id: sensory_designer
+        role: "Sensory Designer"
+        prompt_file: "prompts/experts/sensory_designer.md"
+
 style:
-  # Global visual direction — refined during production
   aesthetic: "grounded sci-fi, warm palette, organic architecture"
-  references: []  # paths to reference images added during development
-  color_palette: []  # hex values defined during style guide creation
+  references: []
+  color_palette: []
 
-characters:
-  generation:
-    tool: "runware"  # or comfyui, flux, etc.
-    consistency_method: "reference_sheet"  # generate character ref sheets first
-    views: ["front", "three_quarter", "profile"]
-
-environments:
+characters_gen:
   generation:
     tool: "runware"
-    method: "tile_and_compose"  # modular environment building
+    consistency_method: "reference_sheet"
+    views: ["front", "three_quarter", "profile"]
+
+environments_gen:
+  generation:
+    tool: "runware"
+    method: "tile_and_compose"
     layers: ["background", "midground", "foreground"]
 
 outputs:
+  - type: world_bible
+    phase: worldbuilding
+    description: "World bible, rules, technology, social structures"
+  - type: character_profiles
+    phase: characters
+    description: "Character designs, psychology, relationships"
+  - type: environment_specs
+    phase: environments
+    description: "Key locations, sensory palette, visual character"
   - type: style_guide
     description: "Visual style bible — colors, textures, lighting"
   - type: character_profile

@@ -31,9 +31,9 @@ STAGE_DIRS = {
 
 STAGE_META = {
     1: {
-        "name": "LLM Council",
-        "icon": "🧠",
-        "description": "Narrative research, vision, and story generation",
+        "name": "Idea",
+        "icon": "💡",
+        "description": "Research, vision synthesis, narrative, and treatment",
         "color": "#6366f1",
     },
     2: {
@@ -183,36 +183,52 @@ async def delete_artifact(stage: int, filename: str):
     return JSONResponse({"ok": True})
 
 
+# ── Helpers for multi-stage council support ─────────────────
+
+def _stage_dir(stage: int) -> Path:
+    return PIPELINE_ROOT / STAGE_DIRS[stage]
+
+
+def _find_expert_stage(expert_id: str) -> int | None:
+    """Find which stage an expert belongs to by checking configs."""
+    for stage_num in [1, 2]:
+        config = load_stage_config(stage_num)
+        for phase in config.get("phases", []):
+            for expert in phase.get("experts", []):
+                if expert["id"] == expert_id:
+                    return stage_num
+    return None
+
+
+def _results_dir(stage: int) -> Path:
+    return _stage_dir(stage) / "outputs" / "experts"
+
+
 # ── Council: expert detail ───────────────────────────────────
 
 @app.get("/api/council/expert/{expert_id}")
 async def get_expert_detail(expert_id: str):
     """Get full details for an expert including their prompt."""
-    config = load_stage_config(1)
-    for phase in config["phases"]:
-        for expert in phase["experts"]:
-            if expert["id"] == expert_id:
-                prompt_path = PIPELINE_ROOT / "01_llm_council" / expert["prompt_file"]
-                prompt_content = prompt_path.read_text() if prompt_path.exists() else ""
+    for stage_num in [1, 2]:
+        config = load_stage_config(stage_num)
+        for phase in config.get("phases", []):
+            for expert in phase.get("experts", []):
+                if expert["id"] == expert_id:
+                    prompt_path = _stage_dir(stage_num) / expert["prompt_file"]
+                    if not prompt_path.exists():
+                        prompt_path = PIPELINE_ROOT / "01_llm_council" / expert["prompt_file"]
+                    prompt_content = prompt_path.read_text() if prompt_path.exists() else ""
 
-                # Find any existing output for this expert
-                artifacts = load_stage_artifacts(1)
-                expert_output = None
-                for a in artifacts:
-                    for eo in a.get("content", {}).get("expert_outputs", []):
-                        if eo.get("expert_id") == expert_id:
-                            expert_output = eo
-
-                return JSONResponse({
-                    "id": expert["id"],
-                    "role": expert["role"],
-                    "phase_id": phase["id"],
-                    "phase_name": phase["name"],
-                    "prompt_file": expert["prompt_file"],
-                    "prompt": prompt_content,
-                    "receives": expert.get("receives", []),
-                    "output": expert_output,
-                })
+                    return JSONResponse({
+                        "id": expert["id"],
+                        "role": expert["role"],
+                        "phase_id": phase["id"],
+                        "phase_name": phase["name"],
+                        "prompt_file": expert["prompt_file"],
+                        "prompt": prompt_content,
+                        "receives": expert.get("receives", []),
+                        "stage": stage_num,
+                    })
 
     return JSONResponse({"error": "Expert not found"}, status_code=404)
 
@@ -220,28 +236,30 @@ async def get_expert_detail(expert_id: str):
 # ── Council: expert results (individual files) ────────────────
 
 @app.get("/api/council/results")
-async def get_council_results():
+async def get_council_results(stage: int = 1):
     """Get all individual expert results for the progress view."""
-    results_dir = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts"
     results = []
-    if results_dir.exists():
-        for path in sorted(results_dir.glob("*.json")):
-            try:
-                data = json.loads(path.read_text())
-                results.append(data)
-            except (json.JSONDecodeError, KeyError):
-                continue
+    for s in ([stage] if stage else [1, 2]):
+        rdir = _results_dir(s)
+        if rdir.exists():
+            for path in sorted(rdir.glob("*.json")):
+                try:
+                    data = json.loads(path.read_text())
+                    results.append(data)
+                except (json.JSONDecodeError, KeyError):
+                    continue
     return JSONResponse({"results": results})
 
 
 @app.get("/api/council/results/{expert_id}")
 async def get_expert_result(expert_id: str):
     """Get a single expert's result."""
-    path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / f"{expert_id}.json"
-    if not path.exists():
-        return JSONResponse({"error": "No result for this expert"}, status_code=404)
-    data = json.loads(path.read_text())
-    return JSONResponse(data)
+    for s in [1, 2]:
+        path = _results_dir(s) / f"{expert_id}.json"
+        if path.exists():
+            data = json.loads(path.read_text())
+            return JSONResponse(data)
+    return JSONResponse({"error": "No result for this expert"}, status_code=404)
 
 
 # ── Council: prompt editing ───────────────────────────────────
@@ -284,30 +302,32 @@ async def clear_council_results():
 @app.delete("/api/council/results/{expert_id}")
 async def delete_expert_result(expert_id: str):
     """Delete a single expert's result."""
-    path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / f"{expert_id}.json"
-    if not path.exists():
-        return JSONResponse({"error": "Not found"}, status_code=404)
-    path.unlink()
-    return JSONResponse({"ok": True})
+    for s in [1, 2]:
+        path = _results_dir(s) / f"{expert_id}.json"
+        if path.exists():
+            path.unlink()
+            return JSONResponse({"ok": True})
+    return JSONResponse({"error": "Not found"}, status_code=404)
 
 
 @app.post("/api/council/results/clear/{phase_id}")
 async def clear_phase_results(phase_id: str):
     """Clear all expert results for a specific phase."""
-    results_dir = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts"
-    if not results_dir.exists():
-        return JSONResponse({"ok": True})
     cleared = 0
-    for path in results_dir.glob("*.json"):
-        if path.name.startswith("_"):
+    for s in [1, 2]:
+        rdir = _results_dir(s)
+        if not rdir.exists():
             continue
-        try:
-            data = json.loads(path.read_text())
-            if data.get("phase_id") == phase_id:
-                path.unlink()
-                cleared += 1
-        except (json.JSONDecodeError, KeyError):
-            continue
+        for path in rdir.glob("*.json"):
+            if path.name.startswith("_"):
+                continue
+            try:
+                data = json.loads(path.read_text())
+                if data.get("phase_id") == phase_id:
+                    path.unlink()
+                    cleared += 1
+            except (json.JSONDecodeError, KeyError):
+                continue
     return JSONResponse({"ok": True, "cleared": cleared})
 
 
@@ -513,9 +533,9 @@ async def get_synthesis():
 # ── Council: phases ──────────────────────────────────────────
 
 @app.get("/api/council/phases")
-async def get_council_phases():
-    config = load_stage_config(1)
-    artifacts = load_stage_artifacts(1)
+async def get_council_phases(stage: int = 1):
+    config = load_stage_config(stage)
+    artifacts = load_stage_artifacts(stage)
 
     phases = []
     for phase in config["phases"]:
@@ -539,6 +559,7 @@ async def get_council_phases():
             "name": phase["name"],
             "description": phase["description"],
             "mode": mode,
+            "context_level": phase.get("context_level", "none"),
             "checkpoint": phase["checkpoint"],
             "expert_count": len(phase["experts"]),
             "experts": [
@@ -558,13 +579,21 @@ class SetPhaseModeRequest(BaseModel):
     mode: str  # "parallel" or "sequential"
 
 
+class SetContextLevelRequest(BaseModel):
+    context_level: str  # "none", "basic", "futurax", "disordine"
+
+
+class UpdatePhaseExpertsRequest(BaseModel):
+    experts: list[dict]  # [{"id": "...", "role": "...", "prompt_file": "..."}]
+
+
 @app.put("/api/council/phase/{phase_id}/mode")
-async def set_phase_mode(phase_id: str, req: SetPhaseModeRequest):
+async def set_phase_mode(phase_id: str, req: SetPhaseModeRequest, stage: int = 1):
     """Toggle a phase between parallel and sequential mode."""
     if req.mode not in ("parallel", "sequential"):
         return JSONResponse({"error": "Mode must be 'parallel' or 'sequential'"}, status_code=400)
 
-    config_path = PIPELINE_ROOT / "01_llm_council" / "config" / "stage.yaml"
+    config_path = _stage_dir(stage) / "config" / "stage.yaml"
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
@@ -585,10 +614,201 @@ async def set_phase_mode(phase_id: str, req: SetPhaseModeRequest):
     return JSONResponse({"ok": True, "mode": req.mode})
 
 
+# ── Council: context level per phase ─────────────────────────
+
+@app.get("/api/council/phase/{phase_id}/context-level")
+async def get_phase_context_level(phase_id: str):
+    config = load_stage_config(1)
+    for phase in config["phases"]:
+        if phase["id"] == phase_id:
+            return JSONResponse({"context_level": phase.get("context_level", "none")})
+    return JSONResponse({"error": "Phase not found"}, status_code=404)
+
+
+@app.put("/api/council/phase/{phase_id}/context-level")
+async def set_phase_context_level(phase_id: str, req: SetContextLevelRequest, stage: int = 1):
+    valid = ["none", "basic", "futurax", "disordine"]
+    if req.context_level not in valid:
+        return JSONResponse({"error": f"Must be one of: {valid}"}, status_code=400)
+
+    config_path = _stage_dir(stage) / "config" / "stage.yaml"
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    for phase in config["phases"]:
+        if phase["id"] == phase_id:
+            phase["context_level"] = req.context_level
+            with open(config_path, "w") as f:
+                yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            return JSONResponse({"ok": True, "context_level": req.context_level})
+
+    return JSONResponse({"error": "Phase not found"}, status_code=404)
+
+
+# ── Council: context preamble preview/edit ───────────────────
+
+@app.get("/api/council/context/{level}")
+async def get_context_preamble(level: str):
+    if level == "none":
+        return JSONResponse({"level": "none", "content": ""})
+    path = PIPELINE_ROOT / "01_llm_council" / "prompts" / "context" / f"{level}.md"
+    if not path.exists():
+        return JSONResponse({"error": "Context level not found"}, status_code=404)
+    return JSONResponse({"level": level, "content": path.read_text()})
+
+
+class SaveContextRequest(BaseModel):
+    content: str
+
+
+@app.put("/api/council/context/{level}")
+async def save_context_preamble(level: str, req: SaveContextRequest):
+    if level == "none":
+        return JSONResponse({"error": "Cannot edit 'none' context"}, status_code=400)
+    path = PIPELINE_ROOT / "01_llm_council" / "prompts" / "context" / f"{level}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(req.content)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/council/context-levels")
+async def list_context_levels():
+    levels = []
+    for level in ["none", "basic", "futurax", "disordine"]:
+        if level == "none":
+            levels.append({"id": "none", "name": "None", "description": "No shared preamble"})
+        else:
+            path = PIPELINE_ROOT / "01_llm_council" / "prompts" / "context" / f"{level}.md"
+            content = path.read_text() if path.exists() else ""
+            levels.append({"id": level, "name": level.title(), "description": content[:100] + "..." if len(content) > 100 else content})
+    return JSONResponse({"levels": levels})
+
+
+# ── Council: expert registry ─────────────────────────────────
+
+class CreateExpertRequest(BaseModel):
+    name: str
+    description: str
+    goals: str
+
+
+CREATE_EXPERT_SYSTEM_PROMPT = """You are an expert prompt engineer for an AI film production pipeline. You receive a description of a domain expert and generate a structured system prompt for them.
+
+Follow this exact format — write in second person ("You are..."), be specific and evocative about their expertise, and structure the output clearly:
+
+```
+# [Expert Title]
+
+[1-2 paragraphs establishing who they are, their expertise, their perspective. Be specific about what makes them uniquely qualified. Reference real-world knowledge domains, methodologies, or creative traditions they draw from.]
+
+## Your Task
+
+[1 paragraph describing what they need to produce. Be specific about the deliverable.]
+
+## What to Produce
+
+[Structured template with labeled sections for their output. Use markdown headers (##) for each section, with parenthetical guidance under each explaining what goes there. Typically 6-10 sections.]
+```
+
+Do NOT include any preamble or explanation outside the prompt itself. Output ONLY the expert prompt content."""
+
+
+@app.post("/api/council/experts/create")
+async def create_expert(req: CreateExpertRequest):
+    """Create a new expert by generating a structured prompt from a description."""
+    import importlib
+    import re
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+
+    expert_id = re.sub(r'[^a-z0-9]+', '_', req.name.lower()).strip('_')
+    prompt_path = PIPELINE_ROOT / "01_llm_council" / "prompts" / "experts" / f"{expert_id}.md"
+
+    if prompt_path.exists():
+        return JSONResponse({"error": f"Expert '{expert_id}' already exists"}, status_code=409)
+
+    user_message = (
+        f"Create an expert prompt for:\n\n"
+        f"**Name:** {req.name}\n"
+        f"**Description:** {req.description}\n"
+        f"**Goals:** {req.goals}\n\n"
+        f"Generate the full expert system prompt now."
+    )
+
+    council = council_mod.LLMCouncil()
+    try:
+        content = await council._call_llm(CREATE_EXPERT_SYSTEM_PROMPT, user_message)
+        prompt_path.write_text(content)
+        first_line = content.strip().split("\n")[0].replace("# ", "").strip()
+        return JSONResponse({
+            "ok": True,
+            "expert": {
+                "id": expert_id,
+                "role": first_line,
+                "prompt_file": f"prompts/experts/{expert_id}.md",
+            }
+        })
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/council/experts/registry")
+async def get_expert_registry():
+    """List all available expert prompt files as a registry."""
+    prompts_dir = PIPELINE_ROOT / "01_llm_council" / "prompts" / "experts"
+    if not prompts_dir.exists():
+        return JSONResponse({"experts": []})
+
+    # Map prompt_file -> list of phase IDs where it's used (across all stages)
+    assigned_phases = {}
+    for stage_num in [1, 2]:
+        config = load_stage_config(stage_num)
+        for phase in config.get("phases", []):
+            for e in phase.get("experts", []):
+                pf = e.get("prompt_file", "")
+                if pf not in assigned_phases:
+                    assigned_phases[pf] = []
+                assigned_phases[pf].append(phase["id"])
+
+    experts = []
+    for path in sorted(prompts_dir.glob("*.md")):
+        expert_id = path.stem
+        content = path.read_text()
+        first_line = content.strip().split("\n")[0].replace("# ", "").strip()
+        prompt_file = f"prompts/experts/{path.name}"
+        experts.append({
+            "id": expert_id,
+            "role": first_line,
+            "prompt_file": prompt_file,
+            "assigned_phases": assigned_phases.get(prompt_file, []),
+        })
+    return JSONResponse({"experts": experts})
+
+
+@app.put("/api/council/phase/{phase_id}/experts")
+async def update_phase_experts(phase_id: str, req: UpdatePhaseExpertsRequest, stage: int = 1):
+    """Update the expert assignments for a phase."""
+    config_path = _stage_dir(stage) / "config" / "stage.yaml"
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    for phase in config["phases"]:
+        if phase["id"] == phase_id:
+            phase["experts"] = [
+                {"id": e["id"], "role": e["role"], "prompt_file": e["prompt_file"]}
+                for e in req.experts
+            ]
+            with open(config_path, "w") as f:
+                yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            return JSONResponse({"ok": True})
+
+    return JSONResponse({"error": "Phase not found"}, status_code=404)
+
+
 # ── Council: run with SSE streaming ──────────────────────────
 
 class RunCouncilRequest(BaseModel):
     phase_id: str | None = None
+    stage: int = 1
 
 
 @app.post("/api/council/run")
@@ -598,6 +818,7 @@ async def run_council_start(req: RunCouncilRequest):
     jobs[job_id] = {
         "status": "starting",
         "phase_id": req.phase_id,
+        "stage": req.stage,
         "logs": [],
         "started_at": datetime.now().isoformat(),
         "experts_total": 0,
@@ -607,7 +828,7 @@ async def run_council_start(req: RunCouncilRequest):
         "error": None,
     }
 
-    task = asyncio.create_task(_run_council_background(job_id, req.phase_id))
+    task = asyncio.create_task(_run_council_background(job_id, req.phase_id, req.stage))
     jobs[job_id]["_task"] = task
 
     return JSONResponse({"ok": True, "job_id": job_id})
@@ -631,9 +852,9 @@ async def cancel_job(job_id: str):
     return JSONResponse({"ok": True})
 
 
-def _save_expert_result(expert_id: str, role: str, phase_id: str, content: str):
+def _save_expert_result(expert_id: str, role: str, phase_id: str, content: str, stage: int = 1):
     """Save a single expert result as its own JSON file for immediate access."""
-    output_dir = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts"
+    output_dir = PIPELINE_ROOT / STAGE_DIRS[stage] / "outputs" / "experts"
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{expert_id}.json"
     data = {
@@ -662,8 +883,13 @@ async def _summarize_expert_output(expert_id: str):
     import importlib
     council_mod = importlib.import_module("pipeline.01_llm_council.council")
 
-    result_path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / f"{expert_id}.json"
-    if not result_path.exists():
+    result_path = None
+    for s in [1, 2]:
+        p = _results_dir(s) / f"{expert_id}.json"
+        if p.exists():
+            result_path = p
+            break
+    if not result_path:
         return None
 
     data = json.loads(result_path.read_text())
@@ -691,14 +917,135 @@ async def summarize_expert(expert_id: str):
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
-async def _run_council_background(job_id: str, phase_id: str | None):
+# ── Feedback loop: multi-model debate ────────────────────────
+
+feedback_loops: dict[str, dict] = {}
+
+
+class StartFeedbackLoopRequest(BaseModel):
+    max_rounds: int = 3
+
+
+@app.post("/api/council/expert/{expert_id}/feedback-loop")
+async def start_feedback_loop(expert_id: str, req: StartFeedbackLoopRequest):
+    """Start a multi-model feedback loop on an expert's output."""
+    # Find the expert result
+    result_path = None
+    for s in [1, 2]:
+        p = _results_dir(s) / f"{expert_id}.json"
+        if p.exists():
+            result_path = p
+            break
+    if not result_path:
+        return JSONResponse({"error": "No expert output to run feedback loop on"}, status_code=404)
+
+    data = json.loads(result_path.read_text())
+
+    loop_id = str(uuid.uuid4())[:8]
+    feedback_loops[loop_id] = {
+        "status": "running",
+        "expert_id": expert_id,
+        "expert_role": data["role"],
+        "max_rounds": req.max_rounds,
+        "events": [],
+        "result": None,
+        "error": None,
+    }
+
+    async def _run():
+        from pipeline.shared.services.feedback_loop import run_feedback_loop
+        loop = feedback_loops[loop_id]
+        try:
+            def on_event(evt):
+                loop["events"].append(evt)
+
+            result = await run_feedback_loop(
+                expert_output=data["content"],
+                expert_role=data["role"],
+                max_rounds=req.max_rounds,
+                on_event=on_event,
+            )
+            loop["result"] = result
+            loop["status"] = "complete"
+
+            # Save alongside expert result
+            loop_path = result_path.parent / f"{expert_id}_feedback_loop.json"
+            loop_path.write_text(json.dumps(result, indent=2, default=str))
+
+        except Exception as e:
+            loop["status"] = "error"
+            loop["error"] = str(e)
+            import traceback
+            loop["events"].append({"message": f"ERROR: {e}", "level": "error", "time": datetime.now().strftime("%H:%M:%S")})
+            traceback.print_exc()
+
+    asyncio.create_task(_run())
+    return JSONResponse({"ok": True, "loop_id": loop_id})
+
+
+@app.get("/api/council/expert/{expert_id}/feedback-loop")
+async def get_feedback_loop_result(expert_id: str):
+    """Get saved feedback loop result for an expert."""
+    for s in [1, 2]:
+        path = _results_dir(s) / f"{expert_id}_feedback_loop.json"
+        if path.exists():
+            data = json.loads(path.read_text())
+            return JSONResponse({"ok": True, "result": data})
+    return JSONResponse({"ok": True, "result": None})
+
+
+@app.get("/api/feedback-loops/{loop_id}/stream")
+async def stream_feedback_loop(loop_id: str):
+    """SSE stream of feedback loop progress."""
+    if loop_id not in feedback_loops:
+        return JSONResponse({"error": "Loop not found"}, status_code=404)
+
+    async def event_generator():
+        last_event_count = 0
+        while True:
+            loop = feedback_loops.get(loop_id)
+            if not loop:
+                break
+
+            events = loop["events"]
+            if len(events) > last_event_count:
+                for evt in events[last_event_count:]:
+                    data = json.dumps({
+                        "type": "log",
+                        "time": evt.get("time", ""),
+                        "message": evt.get("message", ""),
+                        "level": evt.get("level", "info"),
+                        "status": loop["status"],
+                    })
+                    yield f"data: {data}\n\n"
+                last_event_count = len(events)
+
+            if loop["status"] in ("complete", "error"):
+                data = json.dumps({
+                    "type": "done",
+                    "status": loop["status"],
+                    "error": loop.get("error"),
+                })
+                yield f"data: {data}\n\n"
+                break
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+async def _run_council_background(job_id: str, phase_id: str | None, stage: int = 1):
     """Run council in background, updating job state for SSE consumers."""
     import importlib
     council_mod = importlib.import_module("pipeline.01_llm_council.council")
 
     job = jobs[job_id]
     try:
-        council = council_mod.LLMCouncil()
+        council = council_mod.LLMCouncil(stage=stage)
 
         phases_to_run = council.phases
         if phase_id:
@@ -711,7 +1058,16 @@ async def _run_council_background(job_id: str, phase_id: str | None):
             job["phase_name"] = phase.name
             job["phase_id"] = phase.id
             is_parallel = phase.mode == "parallel"
-            _log(job, f"Phase: {phase.name} ({len(phase.experts)} experts, mode: {phase.mode})", level="phase")
+
+            # Read context_level from config
+            raw_config = load_stage_config(stage)
+            ctx_level = "none"
+            for pc in raw_config["phases"]:
+                if pc["id"] == phase.id:
+                    ctx_level = pc.get("context_level", "none")
+                    break
+
+            _log(job, f"Phase: {phase.name} ({len(phase.experts)} experts, mode: {phase.mode}, context: {ctx_level})", level="phase")
             if phase.previous_phase:
                 prev_count = sum(1 for o in council.outputs.values() if o.phase_id == phase.previous_phase)
                 _log(job, f"Context: {prev_count} outputs from {phase.previous_phase} phase", level="info")
@@ -726,12 +1082,12 @@ async def _run_council_background(job_id: str, phase_id: str | None):
                     job["current_expert"] = expert.role
                     _log(job, f"Starting: {expert.role}", level="start", expert=expert.id)
                     try:
-                        output = await council.run_expert(expert, phase, parallel=True)
+                        output = await council.run_expert(expert, phase, parallel=True, context_level=ctx_level)
                     finally:
                         if expert.id in job["running_experts"]:
                             job["running_experts"].remove(expert.id)
                     job["experts_done"] += 1
-                    _save_expert_result(expert.id, expert.role, phase.id, output.content)
+                    _save_expert_result(expert.id, expert.role, phase.id, output.content, stage=stage)
                     _log(job, f"Complete: {expert.role} ({len(output.content)} chars)", level="done", expert=expert.id)
                     return output
 
@@ -746,11 +1102,11 @@ async def _run_council_background(job_id: str, phase_id: str | None):
                     job["current_expert"] = expert.role
                     _log(job, f"[{idx+1}/{len(phase.experts)}] Starting: {expert.role} (sequential + intra-phase context)", level="start", expert=expert.id)
                     _log(job, f"Calling LLM: {council.llm_config['model']}...", level="info")
-                    output = await council.run_expert(expert, phase, include_intra_phase=True)
+                    output = await council.run_expert(expert, phase, include_intra_phase=True, context_level=ctx_level)
                     job["running_experts"] = []
                     results.append(output)
                     job["experts_done"] += 1
-                    _save_expert_result(expert.id, expert.role, phase.id, output.content)
+                    _save_expert_result(expert.id, expert.role, phase.id, output.content, stage=stage)
                     _log(job, f"Complete: {expert.role} ({len(output.content)} chars)", level="done", expert=expert.id)
 
             # Auto-summarize all completed experts

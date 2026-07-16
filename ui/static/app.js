@@ -9,6 +9,25 @@ let activeEvtSource = null;
 let expertResults = {};
 let synthesisData = null;
 let runningExperts = new Set();
+let expertRegistry = null;
+let draggedExpert = null;
+
+function getCouncilPhases(stage) {
+  const cd = councilData[stage];
+  return cd ? cd.phases : [];
+}
+
+function currentStageHasCouncil() {
+  return selectedStage && councilData[selectedStage] && councilData[selectedStage].phases;
+}
+
+function findPhaseAcrossStages(phaseId) {
+  for (const s of Object.keys(councilData)) {
+    const phase = councilData[s].phases.find(p => p.id === phaseId);
+    if (phase) return { phase, stage: parseInt(s) };
+  }
+  return null;
+}
 
 const consoleLogs = [];
 let consoleStatus = null;
@@ -16,19 +35,29 @@ let consoleStatus = null;
 async function fetchPipeline() {
   const res = await fetch('/api/pipeline');
   pipelineData = await res.json();
-  const councilRes = await fetch('/api/council/phases');
-  councilData = await councilRes.json();
+  // Load council data for stages that have phases
+  councilData = {};
+  for (const s of pipelineData.stages) {
+    if (s.config && s.config.phases) {
+      const cRes = await fetch(`/api/council/phases?stage=${s.stage}`);
+      const cData = await cRes.json();
+      councilData[s.stage] = cData;
+    }
+  }
   await fetchExpertResults();
   await fetchSynthesis();
+  await fetchExpertRegistry();
   render();
 }
 
 async function fetchExpertResults() {
   try {
-    const res = await fetch('/api/council/results');
-    const data = await res.json();
     expertResults = {};
-    for (const r of data.results) expertResults[r.expert_id] = r;
+    for (const s of [1, 2]) {
+      const res = await fetch(`/api/council/results?stage=${s}`);
+      const data = await res.json();
+      for (const r of data.results) expertResults[r.expert_id] = r;
+    }
   } catch (e) {}
 }
 
@@ -42,6 +71,7 @@ async function fetchSynthesis() {
 
 function render() {
   renderStages();
+  renderExpertSidebar();
   renderDetailPanel();
   renderConsole();
 }
@@ -91,7 +121,7 @@ function renderDetailPanel() {
   const stage = pipelineData.stages.find(s => s.stage === selectedStage);
   const expertCount = Object.keys(expertResults).length;
   const tabs = [
-    { id: 'generate', label: selectedStage === 1 ? 'Council' : 'Generate' },
+    { id: 'generate', label: currentStageHasCouncil() ? 'Council' : 'Generate' },
     { id: 'progress', label: `Progress${expertCount > 0 ? ` (${expertCount})` : ''}` },
     { id: 'artifacts', label: `Artifacts (${stage.artifact_count})` },
     { id: 'config', label: 'Config' },
@@ -163,17 +193,16 @@ function clearConsole() { consoleLogs.length = 0; consoleStatus = null; renderCo
 // ── Generate panel ──────────────────────────────────────────
 
 function renderGeneratePanel(stage) {
-  if (stage.stage === 1) return renderCouncilPanel();
-  if (stage.stage === 2) return renderWorldbuildingGenerate();
+  if (currentStageHasCouncil()) return renderCouncilPanel();
   if (stage.stage === 3) return renderProductionGenerate();
-  return '';
+  return '<div class="empty-state"><p>No generation panel for this stage.</p></div>';
 }
 
 function renderCouncilPanel() {
-  if (!councilData) return '<div class="generate-panel"><p>Loading...</p></div>';
+  if (!currentStageHasCouncil()) return '<div class="generate-panel"><p>No council phases configured for this stage.</p></div>';
   if (selectedExpert) return renderExpertDetail();
 
-  const phases = councilData.phases;
+  const phases = getCouncilPhases(selectedStage);
   let html = '<div class="council-phases">';
   phases.forEach((phase, i) => {
     const sc = { idle:'var(--text-muted)', pending:'var(--info)', approved:'var(--success)', rejected:'var(--danger)' };
@@ -191,13 +220,24 @@ function renderCouncilPanel() {
           <button class="phase-mode-btn ${phase.mode === 'sequential' ? 'active' : ''}" onclick="event.stopPropagation(); setPhaseMode('${phase.id}', 'sequential')">Sequential</button>
           <span class="phase-mode-desc">${phase.mode === 'parallel' ? 'Experts run independently, previous phase context only' : 'Experts chain within phase + previous phase context'}</span>
         </div>
-        <div class="phase-experts">
+        <div class="phase-mode-bar">
+          <span class="phase-mode-label">Context:</span>
+          <select class="context-level-select" onchange="event.stopPropagation(); setContextLevel('${phase.id}', this.value)">
+            ${['none','basic','futurax','disordine'].map(l => `<option value="${l}" ${phase.context_level === l ? 'selected' : ''}>${l === 'none' ? 'None' : l === 'futurax' ? 'FuturaX' : l.charAt(0).toUpperCase() + l.slice(1)}</option>`).join('')}
+          </select>
+          <button class="btn-icon" onclick="event.stopPropagation(); previewContext('${phase.context_level || 'none'}')" title="Preview context preamble">👁</button>
+        </div>
+        <div class="phase-experts-drop" ondragover="event.preventDefault(); this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="dropToPhase(event, '${phase.id}', this)">
           ${phase.experts.map(e => {
             const done = !!expertResults[e.id];
             const running = runningExperts.has(e.id);
             const cls = running ? 'running' : done ? 'has-result' : '';
-            return `<span class="expert-chip clickable ${cls}" onclick="event.stopPropagation(); loadExpert('${e.id}')">${e.role}</span>`;
+            return `<span class="expert-chip clickable ${cls}" onclick="event.stopPropagation(); loadExpert('${e.id}')">
+              ${e.role}
+              <button class="expert-chip-remove" onclick="event.stopPropagation(); removeExpertFromPhase('${phase.id}', '${e.id}')" title="Remove from phase">×</button>
+            </span>`;
           }).join('')}
+          ${phase.experts.length === 0 ? '<span class="registry-empty">Drag experts here from the sidebar</span>' : ''}
         </div>
         <div class="phase-actions">
           <button class="btn btn-primary" onclick="event.stopPropagation(); runCouncilPhase('${phase.id}')" id="btn-phase-${phase.id}">${phase.status === 'idle' ? 'Run Phase' : 'Re-run'}</button>
@@ -215,9 +255,10 @@ function renderCouncilPanel() {
 const collapsedPhases = new Set();
 
 function renderProgressPanel(stage) {
-  if (stage.stage !== 1 || !councilData) return '<div class="empty-state"><p>Progress tracking for LLM Council.</p></div>';
+  if (!currentStageHasCouncil()) return '<div class="empty-state"><p>No council phases for this stage.</p></div>';
 
-  const totalExperts = councilData.phases.reduce((s, p) => s + p.experts.length, 0);
+  const phases = getCouncilPhases(selectedStage);
+  const totalExperts = phases.reduce((s, p) => s + p.experts.length, 0);
   const doneExperts = Object.keys(expertResults).length;
 
   let html = '<div class="progress-panel">';
@@ -229,7 +270,7 @@ function renderProgressPanel(stage) {
     </div>
   </div>`;
 
-  councilData.phases.forEach(phase => {
+  getCouncilPhases(selectedStage).forEach(phase => {
     const phaseDone = phase.experts.filter(e => !!expertResults[e.id]).length;
     const collapsed = collapsedPhases.has(phase.id);
     const chevron = collapsed ? '▸' : '▾';
@@ -426,6 +467,7 @@ async function openExpertModal(expertId) {
         <button class="gen-tab active" onclick="showModalTab(this, 'modal-summary')">Summary</button>
         <button class="gen-tab" onclick="showModalTab(this, 'modal-full')">Full Output</button>
         <button class="gen-tab" onclick="showModalTab(this, 'modal-rerun')">Rerun with Prompt</button>
+        <button class="gen-tab" onclick="showModalTab(this, 'modal-feedback-loop')">Multi-Model Debate</button>
       </div>
       <div id="modal-summary" class="modal-content-area">
         ${result.summary
@@ -448,6 +490,35 @@ async function openExpertModal(expertId) {
           </div>
         </div>
       </div>
+      <div id="modal-feedback-loop" class="modal-content-area" style="display:none;">
+        <div class="feedback-loop-container" id="fl-container-${expertId}">
+          <div class="fl-header">
+            <div class="fl-description">
+              <h4>Multi-Model Debate</h4>
+              <p>Run this expert's output through 6 different LLMs via OpenRouter. Each model produces its own statement, then they blind-review each other's work, score it (1-5), and revise iteratively until consensus or max rounds.</p>
+              <p class="fl-models-list">Models: Claude Opus 4.8, GPT-4.1, Gemini 2.5 Pro, Grok 3, Qwen 3 235B, DeepSeek R1</p>
+            </div>
+            <div class="fl-controls">
+              <label>Max rounds:</label>
+              <select id="fl-rounds-${expertId}">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3" selected>3</option>
+                <option value="5">5</option>
+                <option value="10">10</option>
+              </select>
+              <button class="btn btn-primary" id="fl-start-${expertId}" onclick="startFeedbackLoop('${expertId}')">Start Debate</button>
+            </div>
+          </div>
+          <div class="fl-monitor" id="fl-monitor-${expertId}" style="display:none;">
+            <div class="fl-monitor-header">
+              <span class="fl-status" id="fl-status-${expertId}">Running...</span>
+            </div>
+            <div class="fl-log" id="fl-log-${expertId}"></div>
+          </div>
+          <div class="fl-results" id="fl-results-${expertId}"></div>
+        </div>
+      </div>
     </div>
     <div class="modal-chat-side">
       <div class="modal-chat-side-header">Chat with ${escapeHtml(result.role)}</div>
@@ -462,6 +533,7 @@ async function openExpertModal(expertId) {
 
   modal.classList.add('visible');
   modal.dataset.expertId = expertId;
+  initFeedbackLoopTab(expertId);
 }
 
 async function sendExpertChat(expertId) {
@@ -535,6 +607,200 @@ function showModalTab(btn, tabId) {
   main.querySelectorAll('.gen-tab').forEach(el => el.classList.remove('active'));
   btn.classList.add('active');
   document.getElementById(tabId).style.display = 'block';
+}
+
+// ── Feedback Loop (Multi-Model Debate) ─────────────────────
+
+async function startFeedbackLoop(expertId) {
+  const roundsEl = document.getElementById(`fl-rounds-${expertId}`);
+  const startBtn = document.getElementById(`fl-start-${expertId}`);
+  const monitorEl = document.getElementById(`fl-monitor-${expertId}`);
+  const logEl = document.getElementById(`fl-log-${expertId}`);
+  const statusEl = document.getElementById(`fl-status-${expertId}`);
+  const resultsEl = document.getElementById(`fl-results-${expertId}`);
+
+  const maxRounds = parseInt(roundsEl.value);
+  startBtn.disabled = true;
+  startBtn.textContent = 'Starting...';
+  monitorEl.style.display = '';
+  logEl.innerHTML = '';
+  resultsEl.innerHTML = '';
+  statusEl.textContent = 'Starting...';
+  statusEl.className = 'fl-status fl-running';
+
+  try {
+    const res = await fetch(`/api/council/expert/${expertId}/feedback-loop`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ max_rounds: maxRounds })
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      showToast(`Error: ${data.error}`);
+      startBtn.disabled = false; startBtn.textContent = 'Start Debate';
+      return;
+    }
+
+    // Stream events
+    const evtSource = new EventSource(`/api/feedback-loops/${data.loop_id}/stream`);
+    evtSource.onmessage = (event) => {
+      const evt = JSON.parse(event.data);
+      if (evt.type === 'log') {
+        const icons = { phase: '▶ ', start: '  ◦ ', done: '  ● ', error: '  ✕ ', info: '  ' };
+        const line = document.createElement('div');
+        line.className = `fl-log-line fl-${evt.level || 'info'}`;
+        line.innerHTML = `<span class="fl-log-time">${evt.time}</span>${icons[evt.level] || '  '}${escapeHtml(evt.message)}`;
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+        statusEl.textContent = evt.message;
+      }
+      if (evt.type === 'done') {
+        evtSource.close();
+        statusEl.textContent = evt.status === 'complete' ? 'Complete' : `Error: ${evt.error || 'Unknown'}`;
+        statusEl.className = `fl-status ${evt.status === 'complete' ? 'fl-complete' : 'fl-error'}`;
+        startBtn.disabled = false; startBtn.textContent = 'Re-run Debate';
+        if (evt.status === 'complete') loadFeedbackLoopResults(expertId);
+      }
+    };
+    evtSource.onerror = () => {
+      evtSource.close();
+      statusEl.textContent = 'Connection lost';
+      statusEl.className = 'fl-status fl-error';
+      startBtn.disabled = false; startBtn.textContent = 'Start Debate';
+    };
+  } catch (e) {
+    showToast(`Error: ${e.message}`);
+    startBtn.disabled = false; startBtn.textContent = 'Start Debate';
+  }
+}
+
+async function loadFeedbackLoopResults(expertId) {
+  const resultsEl = document.getElementById(`fl-results-${expertId}`);
+  if (!resultsEl) return;
+
+  try {
+    const res = await fetch(`/api/council/expert/${expertId}/feedback-loop`);
+    const data = await res.json();
+    if (!data.result) { resultsEl.innerHTML = ''; return; }
+
+    const r = data.result;
+    let html = '';
+
+    // Analysis summary
+    if (r.analysis) {
+      html += `<div class="fl-analysis">
+        <h4>Analysis</h4>
+        <p class="fl-analysis-summary">${escapeHtml(r.analysis.summary || '')}</p>`;
+
+      if (r.analysis.consensus_points && r.analysis.consensus_points.length) {
+        html += '<div class="fl-section"><h5>Consensus Points</h5><ul>';
+        r.analysis.consensus_points.forEach(p => { html += `<li>${escapeHtml(p)}</li>`; });
+        html += '</ul></div>';
+      }
+
+      if (r.analysis.strongest_ideas && r.analysis.strongest_ideas.length) {
+        html += '<div class="fl-section"><h5>Strongest Ideas</h5><ul>';
+        r.analysis.strongest_ideas.forEach(p => { html += `<li>${escapeHtml(p)}</li>`; });
+        html += '</ul></div>';
+      }
+
+      if (r.analysis.similarities && r.analysis.similarities.length) {
+        html += '<div class="fl-section"><h5>Similarities</h5>';
+        r.analysis.similarities.forEach(s => {
+          html += `<div class="fl-finding"><span class="fl-finding-theme">${escapeHtml(s.theme)}</span> ${escapeHtml(s.detail)}</div>`;
+        });
+        html += '</div>';
+      }
+      if (r.analysis.differences && r.analysis.differences.length) {
+        html += '<div class="fl-section"><h5>Differences</h5>';
+        r.analysis.differences.forEach(d => {
+          html += `<div class="fl-finding"><span class="fl-finding-theme">${escapeHtml(d.theme)}</span> ${escapeHtml(d.detail)}</div>`;
+        });
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+
+    // Final statements per model
+    const lastRound = r.rounds[r.rounds.length - 1];
+    if (lastRound && lastRound.statements) {
+      html += '<div class="fl-statements"><h4>Final Statements (Round ' + lastRound.round + ')</h4>';
+      for (const [mid, s] of Object.entries(lastRound.statements)) {
+        html += `<div class="fl-statement-card">
+          <div class="fl-statement-model">${escapeHtml(s.name)}</div>
+          <div class="fl-statement-text">${renderMarkdown(s.text)}</div>
+        </div>`;
+      }
+      html += '</div>';
+    }
+
+    // Round-by-round feedback details (collapsible)
+    if (r.rounds.length > 1) {
+      html += '<div class="fl-rounds-detail"><h4>Round-by-Round Detail</h4>';
+      r.rounds.forEach((round, i) => {
+        if (!round.feedback || Object.keys(round.feedback).length === 0) return;
+        html += `<details class="fl-round-detail"><summary>Round ${round.round} Feedback</summary>`;
+        for (const [mid, feedbacks] of Object.entries(round.feedback)) {
+          if (!feedbacks.length) continue;
+          const avgScore = (feedbacks.reduce((s, f) => s + f.score, 0) / feedbacks.length).toFixed(1);
+          html += `<div class="fl-feedback-group">
+            <div class="fl-feedback-target">Feedback for: ${escapeHtml(lastRound.statements[mid]?.name || mid)} (avg: ${avgScore}/5)</div>`;
+          feedbacks.forEach(fb => {
+            html += `<div class="fl-feedback-item">
+              <span class="fl-score fl-score-${fb.score}">${fb.score}/5</span>
+              <span class="fl-reviewer">${escapeHtml(fb.reviewer)}</span>
+              <span class="fl-feedback-text">${escapeHtml(fb.feedback)}</span>
+            </div>`;
+          });
+          html += '</div>';
+        }
+
+        // Revisions
+        if (round.revisions && Object.keys(round.revisions).length) {
+          html += '<div class="fl-revisions">';
+          for (const [mid, rev] of Object.entries(round.revisions)) {
+            const labels = ['Unchanged', 'Minor', 'Major'];
+            const cls = ['unchanged', 'minor', 'major'];
+            const score = rev.revision_score || 0;
+            html += `<div class="fl-revision-item">
+              <span class="fl-revision-badge fl-rev-${cls[score]}">${labels[score]}</span>
+              <span class="fl-revision-model">${escapeHtml(lastRound.statements[mid]?.name || mid)}</span>
+              ${rev.rationale ? `<span class="fl-revision-rationale">${escapeHtml(rev.rationale)}</span>` : ''}
+            </div>`;
+          }
+          html += '</div>';
+        }
+        html += '</details>';
+      });
+      html += '</div>';
+    }
+
+    resultsEl.innerHTML = html;
+
+    // Also show the monitor if there are results but no active stream
+    const monitorEl = document.getElementById(`fl-monitor-${expertId}`);
+    if (monitorEl) monitorEl.style.display = '';
+
+  } catch (e) { console.error('Failed to load feedback loop results:', e); }
+}
+
+// Load existing feedback loop results when modal opens
+async function initFeedbackLoopTab(expertId) {
+  const resultsEl = document.getElementById(`fl-results-${expertId}`);
+  if (!resultsEl) return;
+  try {
+    const res = await fetch(`/api/council/expert/${expertId}/feedback-loop`);
+    const data = await res.json();
+    if (data.result) {
+      loadFeedbackLoopResults(expertId);
+      const statusEl = document.getElementById(`fl-status-${expertId}`);
+      const monitorEl = document.getElementById(`fl-monitor-${expertId}`);
+      if (statusEl) { statusEl.textContent = 'Previous run available'; statusEl.className = 'fl-status fl-complete'; }
+      if (monitorEl) monitorEl.style.display = '';
+      const startBtn = document.getElementById(`fl-start-${expertId}`);
+      if (startBtn) startBtn.textContent = 'Re-run Debate';
+    }
+  } catch (e) {}
 }
 
 function generateSmartSummary(content) {
@@ -612,7 +878,7 @@ function renderArtifacts(stage) {
   // Expert result cards grid
   html += '<div class="results-grid">';
   if (councilData) {
-    councilData.phases.forEach(phase => {
+    getCouncilPhases(selectedStage).forEach(phase => {
       phase.experts.forEach(e => {
         const result = expertResults[e.id];
         if (!result) return;
@@ -783,7 +1049,8 @@ function showExpertTab(btn, tabId) {
 
 async function setPhaseMode(phaseId, mode) {
   try {
-    const res = await fetch(`/api/council/phase/${phaseId}/mode`, {
+    const stg = selectedStage || 1;
+    const res = await fetch(`/api/council/phase/${phaseId}/mode?stage=${stg}`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode })
     });
     const data = await res.json();
@@ -798,13 +1065,280 @@ async function setPhaseMode(phaseId, mode) {
   }
 }
 
+async function setContextLevel(phaseId, level) {
+  try {
+    const stg = selectedStage || 1;
+    const res = await fetch(`/api/council/phase/${phaseId}/context-level?stage=${stg}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ context_level: level })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showToast(`${phaseId} context → ${level}`);
+      await fetchPipeline();
+    } else showToast(`Error: ${data.error}`);
+  } catch (e) { showToast(`Error: ${e.message}`); }
+}
+
+async function previewContext(level) {
+  if (level === 'none') { showToast('No preamble for "none" context'); return; }
+  try {
+    const res = await fetch(`/api/council/context/${level}`);
+    const data = await res.json();
+    const modal = document.createElement('div');
+    modal.className = 'expert-modal-overlay';
+    modal.onclick = e => { if (e.target === modal) modal.remove(); };
+    modal.innerHTML = `<div class="expert-modal" style="max-width:700px">
+      <div class="modal-header"><h3>Context: ${level}</h3><button class="modal-close" onclick="this.closest('.expert-modal-overlay').remove()">×</button></div>
+      <div class="modal-body">
+        <textarea id="context-edit-area" style="width:100%;min-height:400px;font-family:monospace;font-size:13px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;padding:12px">${data.content.replace(/</g,'&lt;')}</textarea>
+        <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn btn-sm" onclick="this.closest('.expert-modal-overlay').remove()">Cancel</button>
+          <button class="btn btn-sm btn-primary" onclick="saveContext('${level}', document.getElementById('context-edit-area').value, this)">Save</button>
+        </div>
+      </div>
+    </div>`;
+    document.body.appendChild(modal);
+  } catch (e) { showToast(`Error: ${e.message}`); }
+}
+
+async function fetchExpertRegistry() {
+  try {
+    const res = await fetch('/api/council/experts/registry');
+    const data = await res.json();
+    expertRegistry = data.experts;
+  } catch (e) {}
+}
+
+function renderExpertSidebar() {
+  const listEl = document.getElementById('expert-sidebar-list');
+  const countEl = document.getElementById('expert-sidebar-count');
+  if (!listEl || !expertRegistry) return;
+
+  countEl.innerHTML = `${expertRegistry.length} <button class="btn-add-expert" onclick="openCreateExpertModal()" title="Create new expert">+</button>`;
+
+  listEl.innerHTML = expertRegistry.map(e => {
+    const phases = e.assigned_phases || [];
+    const tagsHtml = phases.map(pid => `<span class="expert-phase-tag">${pid}</span>`).join('');
+    return `<div class="expert-sidebar-item" draggable="true"
+      ondragstart="startDrag(event, '${e.id}', '${escapeAttr(e.role)}', '${e.prompt_file}')"
+      onclick="openExpertPromptEditor('${e.id}', '${escapeAttr(e.role)}', '${e.prompt_file}')">
+      <span class="expert-drag-handle">⠿</span>
+      <span class="expert-name">${e.role}</span>
+      <span class="expert-phase-tags">${tagsHtml}</span>
+    </div>`;
+  }).join('');
+}
+
+function escapeAttr(s) { return s.replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+
+function openExpertPromptEditor(expertId, role, promptFile) {
+  // Fetch and show prompt in a modal for viewing/editing
+  fetch(`/api/council/expert/${expertId}`)
+    .then(r => r.json())
+    .then(data => {
+      const modal = document.createElement('div');
+      modal.className = 'expert-modal-overlay';
+      modal.onclick = ev => { if (ev.target === modal) modal.remove(); };
+      const prompt = data.prompt || '';
+      modal.innerHTML = `<div class="expert-modal" style="max-width:750px">
+        <div class="modal-header">
+          <h3>${role}</h3>
+          <button class="modal-close" onclick="this.closest('.expert-modal-overlay').remove()">×</button>
+        </div>
+        <div class="modal-body">
+          <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:8px">${promptFile}</div>
+          <textarea id="expert-prompt-edit" style="width:100%;min-height:450px;font-family:monospace;font-size:13px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;padding:12px;resize:vertical">${prompt.replace(/</g,'&lt;')}</textarea>
+          <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
+            <div style="display:flex;gap:6px;align-items:center">
+              <span style="font-size:0.7rem;color:var(--text-muted)">Add to phase:</span>
+              ${councilData ? Object.entries(councilData).flatMap(([s, cd]) =>
+                cd.phases.map(p =>
+                  `<button class="btn btn-sm" onclick="addExpertToPhase('${p.id}','${expertId}','${escapeAttr(role)}','${promptFile}'); this.textContent='✓'; this.disabled=true">${p.name}</button>`
+                )
+              ).join('') : ''}
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-sm" onclick="this.closest('.expert-modal-overlay').remove()">Cancel</button>
+              <button class="btn btn-sm btn-primary" onclick="saveExpertPrompt('${expertId}', document.getElementById('expert-prompt-edit').value, this)">Save Prompt</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+      document.body.appendChild(modal);
+    })
+    .catch(e => showToast(`Error: ${e.message}`));
+}
+
+async function saveExpertPrompt(expertId, content, btn) {
+  btn.disabled = true; btn.textContent = 'Saving...';
+  try {
+    const res = await fetch(`/api/council/expert/${expertId}/prompt`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content })
+    });
+    const data = await res.json();
+    if (data.ok) { showToast('Prompt saved'); btn.textContent = 'Saved'; }
+    else showToast(`Error: ${data.error}`);
+  } catch (e) { showToast(`Error: ${e.message}`); btn.disabled = false; btn.textContent = 'Save Prompt'; }
+}
+
+function openCreateExpertModal() {
+  const modal = document.createElement('div');
+  modal.className = 'expert-modal-overlay';
+  modal.onclick = ev => { if (ev.target === modal) modal.remove(); };
+  modal.innerHTML = `<div class="expert-modal" style="max-width:600px">
+    <div class="modal-header">
+      <h3>Create New Expert</h3>
+      <button class="modal-close" onclick="this.closest('.expert-modal-overlay').remove()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="create-expert-form">
+        <label>Name / Title</label>
+        <input type="text" id="new-expert-name" placeholder="e.g. Sound Designer, Political Theorist, Marine Biologist" style="width:100%;padding:8px;background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.85rem">
+        <label>Description — who are they, what do they know?</label>
+        <textarea id="new-expert-desc" rows="4" placeholder="Describe their expertise, background, and unique perspective. What domains do they cover? What methodologies or traditions do they draw from?" style="width:100%;padding:8px;background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.85rem;resize:vertical"></textarea>
+        <label>Goals — what should they produce?</label>
+        <textarea id="new-expert-goals" rows="3" placeholder="What specific deliverable should this expert create? What questions should they address? What format should the output take?" style="width:100%;padding:8px;background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.85rem;resize:vertical"></textarea>
+      </div>
+      <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn btn-sm" onclick="this.closest('.expert-modal-overlay').remove()">Cancel</button>
+        <button class="btn btn-sm btn-primary" id="create-expert-btn" onclick="createExpert(this)">Create Expert</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+  document.getElementById('new-expert-name').focus();
+}
+
+async function createExpert(btn) {
+  const name = document.getElementById('new-expert-name').value.trim();
+  const description = document.getElementById('new-expert-desc').value.trim();
+  const goals = document.getElementById('new-expert-goals').value.trim();
+
+  if (!name) { showToast('Name is required'); return; }
+  if (!description) { showToast('Description is required'); return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Generating prompt...';
+
+  try {
+    const res = await fetch('/api/council/experts/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description, goals: goals || description })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showToast(`Created: ${data.expert.role}`);
+      btn.closest('.expert-modal-overlay').remove();
+      await fetchExpertRegistry();
+      await fetchPipeline();
+    } else {
+      showToast(`Error: ${data.error}`);
+      btn.disabled = false;
+      btn.textContent = 'Create Expert';
+    }
+  } catch (e) {
+    showToast(`Error: ${e.message}`);
+    btn.disabled = false;
+    btn.textContent = 'Create Expert';
+  }
+}
+
+async function addExpertToPhase(phaseId, expertId, role, promptFile) {
+  const found = findPhaseAcrossStages(phaseId);
+  const phase = found ? found.phase : null;
+  if (!phase) return;
+  if (phase.experts.some(e => e.id === expertId)) {
+    showToast('Already in this phase');
+    return;
+  }
+  const newExperts = [...phase.experts, { id: expertId, role, prompt_file: promptFile }];
+  await savePhaseExperts(phaseId, newExperts);
+  await fetchPipeline();
+  showToast(`Added to ${phase.name}`);
+}
+
+function startDrag(event, id, role, promptFile) {
+  draggedExpert = { id, role, promptFile };
+  event.dataTransfer.effectAllowed = 'copy';
+  event.target.classList.add('dragging');
+}
+
+async function dropToPhase(event, phaseId, el) {
+  event.preventDefault();
+  el.classList.remove('drag-over');
+  if (!draggedExpert) return;
+
+  const found = findPhaseAcrossStages(phaseId);
+  const phase = found ? found.phase : null;
+  if (!phase) return;
+
+  if (phase.experts.some(e => e.id === draggedExpert.id)) {
+    showToast('Expert already in this phase');
+    draggedExpert = null;
+    return;
+  }
+
+  let promptFile = draggedExpert.promptFile;
+  if (!promptFile) {
+    const reg = expertRegistry.find(e => e.id === draggedExpert.id);
+    if (reg) promptFile = reg.prompt_file;
+  }
+
+  const newExperts = [...phase.experts, { id: draggedExpert.id, role: draggedExpert.role, prompt_file: promptFile }];
+  await savePhaseExperts(phaseId, newExperts);
+  draggedExpert = null;
+  showToast(`Added to ${phase.name}`);
+  await fetchPipeline();
+}
+
+async function removeExpertFromPhase(phaseId, expertId) {
+  const found = findPhaseAcrossStages(phaseId);
+  const phase = found ? found.phase : null;
+  if (!phase) return;
+  const newExperts = phase.experts.filter(e => e.id !== expertId);
+  await savePhaseExperts(phaseId, newExperts);
+  await fetchPipeline();
+}
+
+async function savePhaseExperts(phaseId, experts) {
+  try {
+    const payload = experts.map(e => {
+      const reg = expertRegistry.find(r => r.id === e.id);
+      return { id: e.id, role: e.role, prompt_file: e.prompt_file || (reg ? reg.prompt_file : '') };
+    });
+    const found = findPhaseAcrossStages(phaseId);
+    const stg = found ? found.stage : (selectedStage || 1);
+    const res = await fetch(`/api/council/phase/${phaseId}/experts?stage=${stg}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ experts: payload })
+    });
+    const data = await res.json();
+    if (!data.ok) showToast(`Error: ${data.error}`);
+  } catch (e) { showToast(`Error: ${e.message}`); }
+}
+
+async function saveContext(level, content, btn) {
+  btn.disabled = true; btn.textContent = 'Saving...';
+  try {
+    const res = await fetch(`/api/council/context/${level}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content })
+    });
+    const data = await res.json();
+    if (data.ok) { showToast('Context saved'); btn.closest('.expert-modal-overlay').remove(); }
+    else showToast(`Error: ${data.error}`);
+  } catch (e) { showToast(`Error: ${e.message}`); }
+}
+
 // ── Council execution ───────────────────────────────────────
 
 async function runCouncilPhase(phaseId) {
   const btn = document.getElementById(`btn-phase-${phaseId}`);
   if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
   try {
-    const res = await fetch('/api/council/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phase_id: phaseId }) });
+    const stg = selectedStage || 1;
+    const res = await fetch('/api/council/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phase_id: phaseId, stage: stg }) });
     const data = await res.json();
     if (!data.ok) { showToast(`Error: ${data.error}`); return; }
     currentJobId = data.job_id;
