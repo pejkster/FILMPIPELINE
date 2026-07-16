@@ -1,0 +1,7 @@
+.env
+db/council.db-shm
+db/council.db-wal
+__pycache__/
+*.pyc
+.venv/
+bin/
