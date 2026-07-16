@@ -30,6 +30,11 @@ run_labels = {f"Run {r['id']} — {r['label'] or 'untitled'}": r["id"] for r in 
 run_choice = st.sidebar.selectbox("Run", list(run_labels.keys()))
 run_id = run_labels[run_choice]
 
+topics = db.get_topics(conn)
+topic_by_name = {t["name"]: t for t in topics}
+topic_choice = st.sidebar.radio("Topic", list(topic_by_name.keys()))
+topic = topic_by_name[topic_choice]
+
 st.sidebar.divider()
 
 from src.pdf_report import STATIC_DIR, build_report_pdf  # noqa: E402
@@ -54,11 +59,6 @@ if report_path.exists():
         f'<a href="app/static/{report_filename}" target="_blank">📄 Open Report</a>',
         unsafe_allow_html=True,
     )
-
-topics = db.get_topics(conn)
-topic_by_name = {t["name"]: t for t in topics}
-topic_choice = st.sidebar.radio("Topic", list(topic_by_name.keys()))
-topic = topic_by_name[topic_choice]
 
 models = db.get_models(conn)
 models_by_id = {m["id"]: m for m in models}
