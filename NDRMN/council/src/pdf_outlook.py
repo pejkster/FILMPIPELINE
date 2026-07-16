@@ -25,13 +25,15 @@ def build_outlook_pdf(run_labels: list, sections: list, output_path: Path) -> Pa
     set_font(pdf, "", 11)
     mc(pdf, 6, "Synthesized from " + ", ".join(run_labels) + ".")
 
-    # Body sections
-    for topic, findings, section in sections:
-        pdf.add_page()
-        pdf.ln(10)
-        set_font(pdf, "B", 20)
-        mc(pdf, 11, section.get("section_title") or topic["name"])
-        pdf.ln(6)
+    # Body — one continuous flow, not a page per topic. auto_page_break
+    # handles overflow naturally as the text fills each page.
+    pdf.add_page()
+    for i, (topic, findings, section) in enumerate(sections):
+        if i > 0:
+            pdf.ln(10)
+        set_font(pdf, "B", 16)
+        mc(pdf, 10, section.get("section_title") or topic["name"])
+        pdf.ln(4)
         set_font(pdf, "", 12)
         mc(pdf, 7, section.get("prose", ""), align="J")
 

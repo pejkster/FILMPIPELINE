@@ -6,10 +6,22 @@ from src.outlook import generate_outlook
 from src.pdf_outlook import STATIC_DIR, build_outlook_pdf
 
 
+def next_output_path(static_dir: Path) -> Path:
+    """Never overwrites an existing file — metanoia_outlook.pdf, then
+    metanoia_outlook2.pdf, metanoia_outlook3.pdf, etc."""
+    base = static_dir / "metanoia_outlook.pdf"
+    if not base.exists():
+        return base
+    n = 2
+    while (static_dir / f"metanoia_outlook{n}.pdf").exists():
+        n += 1
+    return static_dir / f"metanoia_outlook{n}.pdf"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate The Metanoia Outlook")
     parser.add_argument("--runs", help="Comma-separated run ids (default: all runs)")
-    parser.add_argument("--output", type=Path, default=STATIC_DIR / "metanoia_outlook.pdf")
+    parser.add_argument("--output", type=Path, help="Output path (default: auto-versioned)")
     args = parser.parse_args()
 
     conn = db.get_connection()
@@ -28,7 +40,8 @@ def main():
         print(f"[{i}/{total}] {step}")
 
     sections = generate_outlook(conn, run_ids, progress_callback=progress)
-    path = build_outlook_pdf(run_labels, sections, args.output)
+    output_path = args.output or next_output_path(STATIC_DIR)
+    path = build_outlook_pdf(run_labels, sections, output_path)
     print(f"Saved: {path}")
 
 

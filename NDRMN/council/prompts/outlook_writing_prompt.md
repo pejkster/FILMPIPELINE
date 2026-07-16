@@ -1,18 +1,18 @@
 # Outlook Writing Prompt (per topic)
 
 The reader-facing step. Takes the extraction results (consensus + standout
-ideas) for one topic and writes the actual prose that appears in "The
-Metanoia Outlook" — a document meant to leave a general audience genuinely
-excited that this future is both real and reachable.
+ideas) for one topic and writes the actual copy that appears in "The Metanoia
+Outlook" — presentational narration for a general audience, in the register
+of a short, inspiring video's voiceover, not literary prose.
 
 ---
 
 ## Prompt text
 
-You are writing one section of a document called The Metanoia Outlook — a
-piece meant for a general audience, describing a plausible, abundant future
-for humanity 40 years from now. Your job is not to summarize research. Your
-job is to make the reader believe, and want, this future.
+You are writing one segment of the narration for a short film presenting a
+plausible, abundant future for humanity, 40 years from now. Picture how a
+confident, inspiring 3-minute video would narrate this — punchy, visual,
+declarative. Your job is to make the audience believe, and want, this future.
 
 **Topic:** {{TOPIC_NAME}}
 
@@ -26,28 +26,36 @@ Standout specific ideas (the most vivid, concrete details worth using):
 
 **Guiding principles for the writing itself:**
 
-- **Story before spectacle.** Ground this in specific people and moments, not
-  abstract trends. A grandfather, a father, a child — the day-to-day texture
-  of a life — will move a reader more than a description of a system.
-- **Optimism without naivety.** This future feels hopeful because something
-  hard was actually solved, not because the problem was written out of
-  existence. Let the difficulty of getting here show through, briefly.
+- **Lead with the innovation, not the struggle to get there.** State plainly
+  what exists now and what it does. This is not a memoir — do not dwell on
+  what came before beyond a single short clause, if at all. The audience
+  should feel forward momentum, not nostalgia.
+- **No recurring characters.** Do not invent a continuing cast (a specific
+  grandfather, father, child) — every segment is written independently, and a
+  named or aged character in one section will not match another. If you use a
+  human moment at all, keep it brief and anonymous ("a child," "a commuter,"
+  "a nurse") — a single flash of a real moment, not a scene with continuity.
 - **Plausibility over fantasy.** Nothing that reads as magic. This should feel
-  like something the reader could imagine actually happening.
-- **Emotional resonance over information density.** The reader should
-  remember how this made them feel, not a list of facts. Cut anything that
-  reads like a report.
-- **Simplicity.** One clear, vivid throughline beats an exhaustive list of
-  ideas. Use the standout details as color, not as a checklist to cram in.
+  like something the audience could imagine actually happening.
+- **Presentational, not novelistic.** Short, declarative sentences. This is
+  narration to be spoken aloud over footage, not prose to be read silently.
+  Favor rhythm and punch over description.
+- **Breadth over depth on a single example.** Name at least 6-8 distinct,
+  concrete innovations or mechanisms from the research — not one or two ideas
+  elaborated at length. Each should be a different specific thing, stated
+  plainly. With more room to work with, each can get a beat of development —
+  a sentence or two — rather than a single clause, but keep moving; don't let
+  any one idea dominate the section.
 
 **Requirements:**
 
-- 300-400 words of prose. No headers, no bullet points, no citations or
-  attributions within the text itself — just well-crafted, flowing prose.
-- Also provide a short, evocative section title (not the plain topic name) —
-  something a reader would want to read under.
+- At least 500 words. Short, declarative sentences, but enough of them to
+  give each innovation room to land. No headers, no bullet points, no
+  citations or attributions within the text itself.
+- Also provide a short, punchy section title — something that could work as
+  an on-screen title card.
 - Avoid AI-report register entirely: no "furthermore," no summarizing
-  sentences, no hedging. Write like a skilled essayist.
+  sentences, no hedging. Write like a director narrating their own trailer.
 
 **Output format:**
 
