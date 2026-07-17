@@ -1,5 +1,5 @@
 stage: 1
-name: LLM Council
+name: Idea
 description: "Four-phase expert council: Research \u2192 Vision \u2192 Narrative \u2192\
   \ Treatment"
 llm:
@@ -11,6 +11,7 @@ phases:
   name: Research & Grounding
   description: Domain experts produce briefings on current trajectories toward abundance
   mode: parallel
+  context_level: basic
   checkpoint: false
   experts:
   - id: energy_analyst
@@ -41,85 +42,59 @@ phases:
   name: Vision Synthesis
   description: Integrate research into a unified, stress-tested vision of the future
   mode: parallel
+  context_level: basic
   checkpoint: true
   experts:
   - id: futurist_integrator
     role: Futurist Integrator
     prompt_file: prompts/experts/futurist_integrator.md
-    receives:
-    - all_research
   - id: anthropologist
     role: Anthropologist
     prompt_file: prompts/experts/anthropologist.md
-    receives:
-    - futurist_integrator
   - id: psychologist
     role: Psychologist
     prompt_file: prompts/experts/psychologist.md
-    receives:
-    - futurist_integrator
-    - anthropologist
   - id: historian
     role: Historian
     prompt_file: prompts/experts/historian.md
-    receives:
-    - futurist_integrator
-    - anthropologist
-    - psychologist
   - id: skeptic
     role: Skeptic / Red Team
     prompt_file: prompts/experts/skeptic.md
-    receives:
-    - futurist_integrator
-    - anthropologist
-    - psychologist
-    - historian
 - id: narrative
   name: Narrative Architecture
   description: Shape the vision into a 3-minute cinematic story
   mode: parallel
+  context_level: futurax
   checkpoint: true
   experts:
   - id: screenwriter
     role: Screenwriter
     prompt_file: prompts/experts/screenwriter.md
-    receives:
-    - vision_document
   - id: cinematic_director
     role: Cinematic Director
     prompt_file: prompts/experts/cinematic_director.md
-    receives:
-    - screenwriter
   - id: lore_keeper
     role: Lore Keeper
     prompt_file: prompts/experts/lore_keeper.md
-    receives:
-    - screenwriter
-    - cinematic_director
   - id: poet
     role: Poet / Lyricist
     prompt_file: prompts/experts/poet.md
-    receives:
-    - screenwriter
-    - cinematic_director
-    - lore_keeper
+  - id: scene_architect
+    role: Scene Architect
+    prompt_file: prompts/experts/scene_architect.md
 - id: treatment
   name: Treatment & Deliverable Assembly
   description: Produce the final 12-page treatment and production-ready scene breakdown
   mode: parallel
+  context_level: futurax
   checkpoint: true
   experts:
   - id: treatment_writer
     role: Treatment Writer
     prompt_file: prompts/experts/treatment_writer.md
-    receives:
-    - narrative_document
   - id: scene_architect
     role: Scene Architect
     prompt_file: prompts/experts/scene_architect.md
-    receives:
-    - narrative_document
-    - treatment_writer
 outputs:
 - type: research_briefing
   phase: research

@@ -19,27 +19,25 @@
     <div id="pipeline-flow" class="pipeline-flow"></div>
 
     <div class="workspace">
-      <!-- Left: tabs + content -->
+      <!-- Left: collapsible expert roster sidebar -->
+      <div id="expert-sidebar" class="expert-sidebar">
+        <div class="expert-sidebar-header">
+          <h4>Expert Roster</h4>
+          <div style="display:flex;align-items:center;gap:0.5rem">
+            <span class="expert-sidebar-count" id="expert-sidebar-count"></span>
+            <button class="btn-icon sidebar-collapse-btn" onclick="toggleExpertSidebar()" title="Collapse sidebar">◀</button>
+          </div>
+        </div>
+        <div id="expert-sidebar-list" class="expert-sidebar-list"></div>
+      </div>
+
+      <!-- Main: tabs + content -->
       <div id="detail-panel" class="detail-panel">
         <div id="detail-content">
           <div class="empty-state">
             <div class="empty-icon">←</div>
             <p>Select a stage above to view its artifacts and configuration</p>
           </div>
-        </div>
-      </div>
-
-      <!-- Right: persistent console -->
-      <div class="console-panel" id="console-panel">
-        <div class="console-header">
-          <h4>Console</h4>
-          <div class="console-header-right">
-            <span class="console-status" id="console-status" style="display:none"></span>
-            <button class="btn btn-sm console-clear-btn" onclick="clearConsole()">Clear</button>
-          </div>
-        </div>
-        <div class="console-log" id="console-log">
-          <div class="console-empty">Run a phase to see live progress here</div>
         </div>
       </div>
     </div>

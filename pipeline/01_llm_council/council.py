@@ -34,7 +34,9 @@ class PhaseConfig:
     mode: str  # "parallel" or "sequential" (with intra-phase chaining)
     checkpoint: bool
     experts: list[ExpertConfig]
+    context_level: str = "none"
     previous_phase: str | None = None
+    include_prior_stage_context: bool = False
 
 
 @dataclass
@@ -46,8 +48,17 @@ class ExpertOutput:
     timestamp: datetime = field(default_factory=datetime.now)
 
 
+STAGE_DIRS = {
+    1: "01_llm_council",
+    2: "02_worldbuilding",
+    3: "03_production",
+}
+
+
 class LLMCouncil:
-    def __init__(self):
+    def __init__(self, stage: int = 1):
+        self.stage = stage
+        self.stage_root = PIPELINE_ROOT / STAGE_DIRS[stage]
         self.config = self._load_config()
         self.llm_config = self.config["llm"]
         self.phases = self._parse_phases()
@@ -55,7 +66,7 @@ class LLMCouncil:
         self._runware: Runware | None = None
 
     def _load_config(self) -> dict:
-        config_path = COUNCIL_ROOT / "config" / "stage.yaml"
+        config_path = self.stage_root / "config" / "stage.yaml"
         with open(config_path) as f:
             return yaml.safe_load(f)
 
@@ -73,7 +84,7 @@ class LLMCouncil:
                 for e in p["experts"]
             ]
             mode = p.get("mode", "sequential" if not p.get("parallel", False) else "parallel")
-            prev_phase = phase_list[i - 1]["id"] if i > 0 else None
+            prev_phase = p.get("previous_phase", phase_list[i - 1]["id"] if i > 0 else None)
             phases.append(PhaseConfig(
                 id=p["id"],
                 name=p["name"],
@@ -81,13 +92,21 @@ class LLMCouncil:
                 mode=mode,
                 checkpoint=p["checkpoint"],
                 experts=experts,
+                context_level=p.get("context_level", "none"),
                 previous_phase=prev_phase,
+                include_prior_stage_context=p.get("include_prior_stage_context",
+                    self.config.get("include_prior_stage_context", False)),
             ))
         return phases
 
     def _load_prior_outputs(self):
         """Load saved expert results from disk so context chaining works across separate runs."""
-        results_dir = COUNCIL_ROOT / "outputs" / "experts"
+        # Load from previous stages for cross-stage context
+        for s in range(1, self.stage + 1):
+            self._load_outputs_from_dir(PIPELINE_ROOT / STAGE_DIRS[s] / "outputs" / "experts")
+
+    def _load_outputs_from_dir(self, results_dir: Path):
+        """Load expert outputs from a specific directory."""
         if not results_dir.exists():
             return
         for path in results_dir.glob("*.json"):
@@ -107,9 +126,32 @@ class LLMCouncil:
             except (json.JSONDecodeError, KeyError):
                 continue
 
+    CONTEXT_LEVELS = ["none", "basic", "futurax", "disordine"]
+
     def _load_prompt(self, prompt_file: str) -> str:
-        path = COUNCIL_ROOT / prompt_file
+        if not prompt_file:
+            return ""
+        path = self.stage_root / prompt_file
+        if not path.exists():
+            path = COUNCIL_ROOT / prompt_file
         return path.read_text()
+
+    def _load_context_preamble(self, level: str) -> str:
+        """Load a context level preamble. Returns empty string for 'none'."""
+        if level == "none" or not level:
+            return ""
+        path = COUNCIL_ROOT / "prompts" / "context" / f"{level}.md"
+        if path.exists():
+            return path.read_text().strip()
+        return ""
+
+    def build_system_prompt(self, expert: ExpertConfig, context_level: str = "none") -> str:
+        """Build the full system prompt: preamble + expert prompt."""
+        preamble = self._load_context_preamble(context_level)
+        expert_prompt = self._load_prompt(expert.prompt_file)
+        if preamble:
+            return preamble + "\n\n---\n\n" + expert_prompt
+        return expert_prompt
 
     def _build_phase_context(self, phase: PhaseConfig) -> str:
         """Build context from all outputs of the previous phase."""
@@ -132,6 +174,27 @@ class LLMCouncil:
             f"# Context from {phase.previous_phase.title()} Phase\n\n"
             "The following outputs were produced by the previous phase. "
             "Build upon this work — don't repeat it, extend and deepen it.\n\n"
+            + "\n\n---\n\n".join(context_parts)
+        )
+
+    def _build_cross_stage_context(self) -> str:
+        """Build context from all prior stage outputs (stage 1 outputs for stage 2, etc.)."""
+        prior_outputs = [
+            o for o in self.outputs.values()
+            if not any(
+                o.phase_id == p.id for p in self.phases
+            )
+        ]
+        if not prior_outputs:
+            return ""
+        context_parts = [
+            f"## {o.role} ({o.phase_id})\n\n{o.content}" for o in prior_outputs
+        ]
+        return (
+            "\n\n---\n\n"
+            "# Context from Prior Stage\n\n"
+            "The following outputs were produced by the previous stage's council. "
+            "Use this as your foundation — build upon it, don't repeat it.\n\n"
             + "\n\n---\n\n".join(context_parts)
         )
 
@@ -190,28 +253,32 @@ class LLMCouncil:
     async def run_expert(
         self, expert: ExpertConfig, phase: PhaseConfig,
         include_intra_phase: bool = False, parallel: bool = False,
+        context_level: str = "none",
     ) -> ExpertOutput:
         """Run a single expert — load prompt, build context, call LLM."""
-        print(f"  [{expert.role}] Starting...")
+        print(f"  [{expert.role}] Starting... (context: {context_level})")
 
-        system_prompt = self._load_prompt(expert.prompt_file)
+        system_prompt = self.build_system_prompt(expert, context_level)
 
-        # Context from previous phase (always included if available)
-        context = self._build_phase_context(phase)
+        # Cross-stage context (outputs from prior stages)
+        phase_context = ""
+        if phase.include_prior_stage_context and self.stage > 1:
+            phase_context = self._build_cross_stage_context()
+
+        # Context from previous phase within this stage
+        prev_phase_ctx = self._build_phase_context(phase)
+        if prev_phase_ctx:
+            phase_context = phase_context + prev_phase_ctx if phase_context else prev_phase_ctx
 
         # Intra-phase chaining (only in sequential mode)
         if include_intra_phase and expert.receives:
             intra = self._build_intra_phase_context(expert)
             if intra:
-                context = context + intra if context else intra
+                phase_context = phase_context + intra if phase_context else intra
 
-        user_message = (
-            "Produce your deliverable now. Follow your instructions precisely. "
-            "Be thorough, specific, and vivid. This is for a real film competition "
-            "with a $3.5 million prize — bring your best work."
-        )
-        if context:
-            user_message = context + "\n\n---\n\n" + user_message
+        user_message = "Produce your deliverable now. Be thorough, specific, and grounded."
+        if phase_context:
+            user_message = phase_context + "\n\n---\n\n" + user_message
 
         content = await self._call_llm(system_prompt, user_message, own_connection=parallel)
 

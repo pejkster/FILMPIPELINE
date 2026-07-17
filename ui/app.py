@@ -31,9 +31,9 @@ STAGE_DIRS = {
 
 STAGE_META = {
     1: {
-        "name": "LLM Council",
-        "icon": "🧠",
-        "description": "Narrative research, vision, and story generation",
+        "name": "Idea",
+        "icon": "💡",
+        "description": "Research, vision synthesis, narrative, and treatment",
         "color": "#6366f1",
     },
     2: {
@@ -183,36 +183,52 @@ async def delete_artifact(stage: int, filename: str):
     return JSONResponse({"ok": True})
 
 
+# ── Helpers for multi-stage council support ─────────────────
+
+def _stage_dir(stage: int) -> Path:
+    return PIPELINE_ROOT / STAGE_DIRS[stage]
+
+
+def _find_expert_stage(expert_id: str) -> int | None:
+    """Find which stage an expert belongs to by checking configs."""
+    for stage_num in [1, 2]:
+        config = load_stage_config(stage_num)
+        for phase in config.get("phases", []):
+            for expert in phase.get("experts", []):
+                if expert["id"] == expert_id:
+                    return stage_num
+    return None
+
+
+def _results_dir(stage: int) -> Path:
+    return _stage_dir(stage) / "outputs" / "experts"
+
+
 # ── Council: expert detail ───────────────────────────────────
 
 @app.get("/api/council/expert/{expert_id}")
 async def get_expert_detail(expert_id: str):
     """Get full details for an expert including their prompt."""
-    config = load_stage_config(1)
-    for phase in config["phases"]:
-        for expert in phase["experts"]:
-            if expert["id"] == expert_id:
-                prompt_path = PIPELINE_ROOT / "01_llm_council" / expert["prompt_file"]
-                prompt_content = prompt_path.read_text() if prompt_path.exists() else ""
+    for stage_num in [1, 2]:
+        config = load_stage_config(stage_num)
+        for phase in config.get("phases", []):
+            for expert in phase.get("experts", []):
+                if expert["id"] == expert_id:
+                    prompt_path = _stage_dir(stage_num) / expert["prompt_file"]
+                    if not prompt_path.exists():
+                        prompt_path = PIPELINE_ROOT / "01_llm_council" / expert["prompt_file"]
+                    prompt_content = prompt_path.read_text() if prompt_path.exists() else ""
 
-                # Find any existing output for this expert
-                artifacts = load_stage_artifacts(1)
-                expert_output = None
-                for a in artifacts:
-                    for eo in a.get("content", {}).get("expert_outputs", []):
-                        if eo.get("expert_id") == expert_id:
-                            expert_output = eo
-
-                return JSONResponse({
-                    "id": expert["id"],
-                    "role": expert["role"],
-                    "phase_id": phase["id"],
-                    "phase_name": phase["name"],
-                    "prompt_file": expert["prompt_file"],
-                    "prompt": prompt_content,
-                    "receives": expert.get("receives", []),
-                    "output": expert_output,
-                })
+                    return JSONResponse({
+                        "id": expert["id"],
+                        "role": expert["role"],
+                        "phase_id": phase["id"],
+                        "phase_name": phase["name"],
+                        "prompt_file": expert["prompt_file"],
+                        "prompt": prompt_content,
+                        "receives": expert.get("receives", []),
+                        "stage": stage_num,
+                    })
 
     return JSONResponse({"error": "Expert not found"}, status_code=404)
 
@@ -220,28 +236,30 @@ async def get_expert_detail(expert_id: str):
 # ── Council: expert results (individual files) ────────────────
 
 @app.get("/api/council/results")
-async def get_council_results():
+async def get_council_results(stage: int = 1):
     """Get all individual expert results for the progress view."""
-    results_dir = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts"
     results = []
-    if results_dir.exists():
-        for path in sorted(results_dir.glob("*.json")):
-            try:
-                data = json.loads(path.read_text())
-                results.append(data)
-            except (json.JSONDecodeError, KeyError):
-                continue
+    for s in ([stage] if stage else [1, 2]):
+        rdir = _results_dir(s)
+        if rdir.exists():
+            for path in sorted(rdir.glob("*.json")):
+                try:
+                    data = json.loads(path.read_text())
+                    results.append(data)
+                except (json.JSONDecodeError, KeyError):
+                    continue
     return JSONResponse({"results": results})
 
 
 @app.get("/api/council/results/{expert_id}")
 async def get_expert_result(expert_id: str):
     """Get a single expert's result."""
-    path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / f"{expert_id}.json"
-    if not path.exists():
-        return JSONResponse({"error": "No result for this expert"}, status_code=404)
-    data = json.loads(path.read_text())
-    return JSONResponse(data)
+    for s in [1, 2]:
+        path = _results_dir(s) / f"{expert_id}.json"
+        if path.exists():
+            data = json.loads(path.read_text())
+            return JSONResponse(data)
+    return JSONResponse({"error": "No result for this expert"}, status_code=404)
 
 
 # ── Council: prompt editing ───────────────────────────────────
@@ -284,30 +302,32 @@ async def clear_council_results():
 @app.delete("/api/council/results/{expert_id}")
 async def delete_expert_result(expert_id: str):
     """Delete a single expert's result."""
-    path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / f"{expert_id}.json"
-    if not path.exists():
-        return JSONResponse({"error": "Not found"}, status_code=404)
-    path.unlink()
-    return JSONResponse({"ok": True})
+    for s in [1, 2]:
+        path = _results_dir(s) / f"{expert_id}.json"
+        if path.exists():
+            path.unlink()
+            return JSONResponse({"ok": True})
+    return JSONResponse({"error": "Not found"}, status_code=404)
 
 
 @app.post("/api/council/results/clear/{phase_id}")
 async def clear_phase_results(phase_id: str):
     """Clear all expert results for a specific phase."""
-    results_dir = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts"
-    if not results_dir.exists():
-        return JSONResponse({"ok": True})
     cleared = 0
-    for path in results_dir.glob("*.json"):
-        if path.name.startswith("_"):
+    for s in [1, 2]:
+        rdir = _results_dir(s)
+        if not rdir.exists():
             continue
-        try:
-            data = json.loads(path.read_text())
-            if data.get("phase_id") == phase_id:
-                path.unlink()
-                cleared += 1
-        except (json.JSONDecodeError, KeyError):
-            continue
+        for path in rdir.glob("*.json"):
+            if path.name.startswith("_"):
+                continue
+            try:
+                data = json.loads(path.read_text())
+                if data.get("phase_id") == phase_id:
+                    path.unlink()
+                    cleared += 1
+            except (json.JSONDecodeError, KeyError):
+                continue
     return JSONResponse({"ok": True, "cleared": cleared})
 
 
@@ -452,10 +472,62 @@ async def get_expert_chat(expert_id: str):
 
 # ── Council: synthesize results ───────────────────────────────
 
+SYNTHESIS_PROMPTS = {
+    1: """You are a synthesis expert. You receive research outputs from multiple domain experts about a hopeful future for humanity.
+
+Produce a clear, structured synthesis with:
+1. **Top 5 Key Takeaways** — the most important cross-cutting insights
+2. **Common Themes** — patterns that appear across multiple experts
+3. **Tensions & Trade-offs** — where experts disagree or identify competing priorities
+4. **Strongest Visual Opportunities** — the most cinematic moments suggested across all experts
+5. **Recommended Focus Areas** — what the film should prioritize given all inputs
+
+Be concise and specific. This is for a 3-minute cinematic trailer about an abundant future.""",
+
+    2: """You are a worldbuilding synthesis expert. You receive outputs from world design experts who have built the rules, characters, environments, and sensory reality of a near-future world.
+
+Your job is to distill their work into **production-ready briefs** that downstream visual artists can act on directly.
+
+Produce a structured synthesis with these exact sections:
+
+## World Summary
+A single-paragraph description of this world — its core identity, what makes it feel real, what makes it feel different from today.
+
+## Character Briefs
+For each major character the experts defined:
+- **Name & Role** — who they are in the story
+- **Visual Description** — age, build, face, hair, skin tone, distinguishing features (be specific enough for image generation)
+- **Wardrobe** — what they wear, materials, colors, style (everyday + any special outfits)
+- **Emotional Register** — how they carry themselves, default expression, body language
+- **Key Props** — objects they interact with
+
+## Environment Briefs
+For each key location the experts defined:
+- **Name & Function** — what this place is and what happens here
+- **Spatial Description** — scale, layout, key architectural features
+- **Materials & Surfaces** — what it's made of, textures, how light interacts with surfaces
+- **Time of Day & Lighting** — default lighting mood, color temperature
+- **Atmosphere** — sounds, smells, temperature, how it feels to be there
+- **Camera Opportunities** — the 2-3 most cinematic angles or moments in this space
+
+## Visual Style Guide
+- **Color Palette** — 5-7 primary colors with hex codes and where each is used
+- **Material Language** — the dominant materials and textures (organic tech, wood+light, etc.)
+- **Lighting Philosophy** — how light behaves in this world, golden hour vs cool blue, natural vs artificial
+- **Technology Aesthetic** — how tech looks and feels, what it's made of, how people interact with it
+- **Typography & Signage** — if text appears in-world, what does it look like
+
+## The Bridge
+3-5 visual moments that show the connection from today to this world — what the audience can recognize from their own life, transformed.
+
+Be extremely specific and visual. Every description should be concrete enough that an image generation model could act on it.""",
+}
+
+
 @app.post("/api/council/synthesize")
-async def synthesize_results():
-    """Run an LLM call to synthesize all expert outputs into key takeaways."""
-    results_dir = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts"
+async def synthesize_results(stage: int = 1):
+    """Run an LLM call to synthesize all expert outputs into production-ready briefs."""
+    results_dir = PIPELINE_ROOT / STAGE_DIRS.get(stage, STAGE_DIRS[1]) / "outputs" / "experts"
     if not results_dir.exists():
         return JSONResponse({"error": "No expert results to synthesize"}, status_code=400)
 
@@ -470,29 +542,149 @@ async def synthesize_results():
         return JSONResponse({"error": "No expert results to synthesize"}, status_code=400)
 
     combined = "\n\n---\n\n".join(expert_texts)
-
-    system_prompt = """You are a synthesis expert. You receive research outputs from multiple domain experts about a hopeful future for humanity.
-
-Produce a clear, structured synthesis with:
-1. **Top 5 Key Takeaways** — the most important cross-cutting insights
-2. **Common Themes** — patterns that appear across multiple experts
-3. **Tensions & Trade-offs** — where experts disagree or identify competing priorities
-4. **Strongest Visual Opportunities** — the most cinematic moments suggested across all experts
-5. **Recommended Focus Areas** — what the film should prioritize given all inputs
-
-Be concise and specific. This is for a 3-minute cinematic trailer about an abundant future."""
+    system_prompt = SYNTHESIS_PROMPTS.get(stage, SYNTHESIS_PROMPTS[1])
 
     import importlib
     council_mod = importlib.import_module("pipeline.01_llm_council.council")
-    council = council_mod.LLMCouncil()
+    council = council_mod.LLMCouncil(stage=stage)
     try:
-        result = await council._call_llm(system_prompt, f"Synthesize these expert research outputs:\n\n{combined}")
-        # Save synthesis
+        result = await council._call_llm(system_prompt, f"Synthesize these expert outputs into production-ready briefs:\n\n{combined}")
         synth_path = results_dir / "_synthesis.json"
         synth_data = {
             "content": result,
             "timestamp": datetime.now().isoformat(),
             "expert_count": len(expert_texts),
+            "stage": stage,
+        }
+        synth_path.write_text(json.dumps(synth_data, indent=2))
+
+        # For Stage 2, auto-extract structured briefs for generation cards
+        briefs_data = None
+        if stage == 2:
+            try:
+                briefs_data = await _extract_briefs(council, result)
+                briefs_path = results_dir / "_briefs.json"
+                briefs_path.write_text(json.dumps(briefs_data, indent=2))
+            except Exception:
+                pass
+
+        resp = {"ok": True, "synthesis": synth_data}
+        if briefs_data:
+            resp["briefs"] = briefs_data
+        return JSONResponse(resp)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+BRIEFS_EXTRACTION_PROMPT = """You are extracting structured data from a worldbuilding synthesis document. Parse the synthesis and extract every character and environment into a structured JSON format that can be used directly for image generation.
+
+For characters, write a detailed visual prompt that an image generation model can use — focus on physical appearance, clothing, posture, and setting. Do NOT include abstract traits like "brave" — only what a camera would see.
+
+For environments, write a detailed scene prompt — architecture, materials, lighting, atmosphere, time of day, camera angle.
+
+For the style guide, extract the color palette and overall aesthetic direction.
+
+Return ONLY valid JSON in this exact format:
+
+```json
+{
+  "characters": [
+    {
+      "name": "Character Name",
+      "role": "Their role in the story",
+      "description": "2-3 sentence character summary for context",
+      "visual_prompt": "Detailed visual description for image generation: age, ethnicity, build, face, hair, skin, clothing materials and colors, pose, expression, setting, lighting. 50-80 words.",
+      "style_prompt": "grounded sci-fi, organic materials, warm palette, cinematic portrait"
+    }
+  ],
+  "environments": [
+    {
+      "name": "Location Name",
+      "function": "What happens here",
+      "description": "2-3 sentence location summary",
+      "visual_prompt": "Detailed scene description for image generation: architecture, materials, scale, lighting, atmosphere, time of day, camera angle, foreground/midground/background elements. 50-80 words.",
+      "style_prompt": "grounded sci-fi, organic architecture, golden hour, cinematic wide shot"
+    }
+  ],
+  "style": {
+    "palette": [
+      {"name": "color name", "hex": "#hex", "usage": "where this color appears"}
+    ],
+    "aesthetic": "One paragraph describing the overall visual aesthetic",
+    "lighting": "One paragraph on lighting philosophy",
+    "materials": "One paragraph on dominant materials and textures"
+  }
+}
+```
+
+Extract ALL characters and environments mentioned. Be thorough with visual prompts — they must be specific enough for consistent image generation."""
+
+
+async def _extract_briefs(council, synthesis_content: str) -> dict:
+    """Extract structured briefs from synthesis markdown."""
+    result = await council._call_llm(
+        BRIEFS_EXTRACTION_PROMPT,
+        f"Extract structured briefs from this synthesis:\n\n{synthesis_content}"
+    )
+    text = result.strip()
+    import re
+    match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    if match:
+        text = match.group(1)
+    return json.loads(text)
+
+
+@app.post("/api/council/synthesize-phase")
+async def synthesize_phase(phase_id: str, stage: int = 1):
+    """Synthesize outputs from a single phase."""
+    results_dir = PIPELINE_ROOT / STAGE_DIRS.get(stage, STAGE_DIRS[1]) / "outputs" / "experts"
+    if not results_dir.exists():
+        return JSONResponse({"error": "No results directory"}, status_code=400)
+
+    config = load_stage_config(stage)
+    phase_config = next((p for p in config["phases"] if p["id"] == phase_id), None)
+    if not phase_config:
+        return JSONResponse({"error": "Phase not found"}, status_code=404)
+
+    expert_ids = {e["id"] for e in phase_config["experts"]}
+    expert_texts = []
+    for path in sorted(results_dir.glob("*.json")):
+        if path.name.startswith("_"):
+            continue
+        data = json.loads(path.read_text())
+        if data.get("expert_id") in expert_ids:
+            expert_texts.append(f"## {data['role']}\n\n{data['content'][:3000]}")
+
+    if not expert_texts:
+        return JSONResponse({"error": "No expert results for this phase"}, status_code=400)
+
+    combined = "\n\n---\n\n".join(expert_texts)
+    phase_name = phase_config["name"]
+
+    system_prompt = f"""You are a synthesis expert. You receive outputs from the "{phase_name}" phase experts.
+
+Produce a clear, structured synthesis of their work:
+1. **Key Findings** — the most important insights from this phase
+2. **Common Ground** — where experts agree
+3. **Tensions** — where experts disagree or identify trade-offs
+4. **Actionable Outputs** — specific decisions, descriptions, or specs that downstream work can build on
+5. **Open Questions** — what still needs resolution
+
+Be concise and specific. Focus on what's actionable."""
+
+    import importlib
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+    council = council_mod.LLMCouncil(stage=stage)
+    try:
+        result = await council._call_llm(system_prompt, f"Synthesize these {phase_name} phase outputs:\n\n{combined}")
+        synth_path = results_dir / f"_synthesis_{phase_id}.json"
+        synth_data = {
+            "content": result,
+            "phase_id": phase_id,
+            "phase_name": phase_name,
+            "timestamp": datetime.now().isoformat(),
+            "expert_count": len(expert_texts),
+            "stage": stage,
         }
         synth_path.write_text(json.dumps(synth_data, indent=2))
         return JSONResponse({"ok": True, "synthesis": synth_data})
@@ -501,21 +693,54 @@ Be concise and specific. This is for a 3-minute cinematic trailer about an abund
 
 
 @app.get("/api/council/synthesis")
-async def get_synthesis():
+async def get_synthesis(stage: int = 1):
     """Get the saved synthesis if it exists."""
-    synth_path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / "_synthesis.json"
+    stage_dir = STAGE_DIRS.get(stage, STAGE_DIRS[1])
+    synth_path = PIPELINE_ROOT / stage_dir / "outputs" / "experts" / "_synthesis.json"
     if not synth_path.exists():
         return JSONResponse({"synthesis": None})
     data = json.loads(synth_path.read_text())
     return JSONResponse({"synthesis": data})
 
 
+@app.get("/api/council/briefs")
+async def get_briefs(stage: int = 2):
+    """Get extracted structured briefs for generation cards."""
+    stage_dir = STAGE_DIRS.get(stage, STAGE_DIRS[2])
+    briefs_path = PIPELINE_ROOT / stage_dir / "outputs" / "experts" / "_briefs.json"
+    if not briefs_path.exists():
+        return JSONResponse({"briefs": None})
+    data = json.loads(briefs_path.read_text())
+    return JSONResponse({"briefs": data})
+
+
+@app.post("/api/council/briefs/extract")
+async def extract_briefs_from_synthesis(stage: int = 2):
+    """Re-extract structured briefs from existing synthesis."""
+    stage_dir = STAGE_DIRS.get(stage, STAGE_DIRS[stage])
+    synth_path = PIPELINE_ROOT / stage_dir / "outputs" / "experts" / "_synthesis.json"
+    if not synth_path.exists():
+        return JSONResponse({"error": "No synthesis found"}, status_code=400)
+
+    synth = json.loads(synth_path.read_text())
+    import importlib
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+    council = council_mod.LLMCouncil(stage=stage)
+    try:
+        briefs = await _extract_briefs(council, synth["content"])
+        briefs_path = PIPELINE_ROOT / stage_dir / "outputs" / "experts" / "_briefs.json"
+        briefs_path.write_text(json.dumps(briefs, indent=2))
+        return JSONResponse({"ok": True, "briefs": briefs})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 # ── Council: phases ──────────────────────────────────────────
 
 @app.get("/api/council/phases")
-async def get_council_phases():
-    config = load_stage_config(1)
-    artifacts = load_stage_artifacts(1)
+async def get_council_phases(stage: int = 1):
+    config = load_stage_config(stage)
+    artifacts = load_stage_artifacts(stage)
 
     phases = []
     for phase in config["phases"]:
@@ -539,6 +764,9 @@ async def get_council_phases():
             "name": phase["name"],
             "description": phase["description"],
             "mode": mode,
+            "context_level": phase.get("context_level", "none"),
+            "include_prior_stage_context": phase.get("include_prior_stage_context",
+                config.get("include_prior_stage_context", False)),
             "checkpoint": phase["checkpoint"],
             "expert_count": len(phase["experts"]),
             "experts": [
@@ -558,13 +786,21 @@ class SetPhaseModeRequest(BaseModel):
     mode: str  # "parallel" or "sequential"
 
 
+class SetContextLevelRequest(BaseModel):
+    context_level: str  # "none", "basic", "futurax", "disordine"
+
+
+class UpdatePhaseExpertsRequest(BaseModel):
+    experts: list[dict]  # [{"id": "...", "role": "...", "prompt_file": "..."}]
+
+
 @app.put("/api/council/phase/{phase_id}/mode")
-async def set_phase_mode(phase_id: str, req: SetPhaseModeRequest):
+async def set_phase_mode(phase_id: str, req: SetPhaseModeRequest, stage: int = 1):
     """Toggle a phase between parallel and sequential mode."""
     if req.mode not in ("parallel", "sequential"):
         return JSONResponse({"error": "Mode must be 'parallel' or 'sequential'"}, status_code=400)
 
-    config_path = PIPELINE_ROOT / "01_llm_council" / "config" / "stage.yaml"
+    config_path = _stage_dir(stage) / "config" / "stage.yaml"
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
@@ -585,10 +821,234 @@ async def set_phase_mode(phase_id: str, req: SetPhaseModeRequest):
     return JSONResponse({"ok": True, "mode": req.mode})
 
 
+# ── Council: context level per phase ─────────────────────────
+
+@app.get("/api/council/phase/{phase_id}/context-level")
+async def get_phase_context_level(phase_id: str):
+    config = load_stage_config(1)
+    for phase in config["phases"]:
+        if phase["id"] == phase_id:
+            return JSONResponse({"context_level": phase.get("context_level", "none")})
+    return JSONResponse({"error": "Phase not found"}, status_code=404)
+
+
+@app.put("/api/council/phase/{phase_id}/context-level")
+async def set_phase_context_level(phase_id: str, req: SetContextLevelRequest, stage: int = 1):
+    valid = ["none", "basic", "futurax", "disordine"]
+    if req.context_level not in valid:
+        return JSONResponse({"error": f"Must be one of: {valid}"}, status_code=400)
+
+    config_path = _stage_dir(stage) / "config" / "stage.yaml"
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    for phase in config["phases"]:
+        if phase["id"] == phase_id:
+            phase["context_level"] = req.context_level
+            with open(config_path, "w") as f:
+                yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            return JSONResponse({"ok": True, "context_level": req.context_level})
+
+    return JSONResponse({"error": "Phase not found"}, status_code=404)
+
+
+# ── Council: prior stage context toggle ───────────────────
+
+@app.get("/api/council/phase/{phase_id}/prior-context")
+async def get_phase_prior_context(phase_id: str, stage: int = 1):
+    config = load_stage_config(stage)
+    stage_level = config.get("include_prior_stage_context", False)
+    for phase in config["phases"]:
+        if phase["id"] == phase_id:
+            enabled = phase.get("include_prior_stage_context", stage_level)
+            return JSONResponse({"include_prior_stage_context": enabled})
+    return JSONResponse({"error": "Phase not found"}, status_code=404)
+
+
+class SetPriorContextRequest(BaseModel):
+    enabled: bool
+
+
+@app.put("/api/council/phase/{phase_id}/prior-context")
+async def set_phase_prior_context(phase_id: str, req: SetPriorContextRequest, stage: int = 1):
+    config_path = _stage_dir(stage) / "config" / "stage.yaml"
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    for phase in config["phases"]:
+        if phase["id"] == phase_id:
+            phase["include_prior_stage_context"] = req.enabled
+            with open(config_path, "w") as f:
+                yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            return JSONResponse({"ok": True, "include_prior_stage_context": req.enabled})
+
+    return JSONResponse({"error": "Phase not found"}, status_code=404)
+
+
+# ── Council: context preamble preview/edit ───────────────────
+
+@app.get("/api/council/context/{level}")
+async def get_context_preamble(level: str):
+    if level == "none":
+        return JSONResponse({"level": "none", "content": ""})
+    path = PIPELINE_ROOT / "01_llm_council" / "prompts" / "context" / f"{level}.md"
+    if not path.exists():
+        return JSONResponse({"error": "Context level not found"}, status_code=404)
+    return JSONResponse({"level": level, "content": path.read_text()})
+
+
+class SaveContextRequest(BaseModel):
+    content: str
+
+
+@app.put("/api/council/context/{level}")
+async def save_context_preamble(level: str, req: SaveContextRequest):
+    if level == "none":
+        return JSONResponse({"error": "Cannot edit 'none' context"}, status_code=400)
+    path = PIPELINE_ROOT / "01_llm_council" / "prompts" / "context" / f"{level}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(req.content)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/council/context-levels")
+async def list_context_levels():
+    levels = []
+    for level in ["none", "basic", "futurax", "disordine"]:
+        if level == "none":
+            levels.append({"id": "none", "name": "None", "description": "No shared preamble"})
+        else:
+            path = PIPELINE_ROOT / "01_llm_council" / "prompts" / "context" / f"{level}.md"
+            content = path.read_text() if path.exists() else ""
+            levels.append({"id": level, "name": level.title(), "description": content[:100] + "..." if len(content) > 100 else content})
+    return JSONResponse({"levels": levels})
+
+
+# ── Council: expert registry ─────────────────────────────────
+
+class CreateExpertRequest(BaseModel):
+    name: str
+    description: str
+    goals: str
+
+
+CREATE_EXPERT_SYSTEM_PROMPT = """You are an expert prompt engineer for an AI film production pipeline. You receive a description of a domain expert and generate a structured system prompt for them.
+
+Follow this exact format — write in second person ("You are..."), be specific and evocative about their expertise, and structure the output clearly:
+
+```
+# [Expert Title]
+
+[1-2 paragraphs establishing who they are, their expertise, their perspective. Be specific about what makes them uniquely qualified. Reference real-world knowledge domains, methodologies, or creative traditions they draw from.]
+
+## Your Task
+
+[1 paragraph describing what they need to produce. Be specific about the deliverable.]
+
+## What to Produce
+
+[Structured template with labeled sections for their output. Use markdown headers (##) for each section, with parenthetical guidance under each explaining what goes there. Typically 6-10 sections.]
+```
+
+Do NOT include any preamble or explanation outside the prompt itself. Output ONLY the expert prompt content."""
+
+
+@app.post("/api/council/experts/create")
+async def create_expert(req: CreateExpertRequest):
+    """Create a new expert by generating a structured prompt from a description."""
+    import importlib
+    import re
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+
+    expert_id = re.sub(r'[^a-z0-9]+', '_', req.name.lower()).strip('_')
+    prompt_path = PIPELINE_ROOT / "01_llm_council" / "prompts" / "experts" / f"{expert_id}.md"
+
+    if prompt_path.exists():
+        return JSONResponse({"error": f"Expert '{expert_id}' already exists"}, status_code=409)
+
+    user_message = (
+        f"Create an expert prompt for:\n\n"
+        f"**Name:** {req.name}\n"
+        f"**Description:** {req.description}\n"
+        f"**Goals:** {req.goals}\n\n"
+        f"Generate the full expert system prompt now."
+    )
+
+    council = council_mod.LLMCouncil()
+    try:
+        content = await council._call_llm(CREATE_EXPERT_SYSTEM_PROMPT, user_message)
+        prompt_path.write_text(content)
+        first_line = content.strip().split("\n")[0].replace("# ", "").strip()
+        return JSONResponse({
+            "ok": True,
+            "expert": {
+                "id": expert_id,
+                "role": first_line,
+                "prompt_file": f"prompts/experts/{expert_id}.md",
+            }
+        })
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/council/experts/registry")
+async def get_expert_registry():
+    """List all available expert prompt files as a registry."""
+    prompts_dir = PIPELINE_ROOT / "01_llm_council" / "prompts" / "experts"
+    if not prompts_dir.exists():
+        return JSONResponse({"experts": []})
+
+    # Map prompt_file -> list of phase IDs where it's used (across all stages)
+    assigned_phases = {}
+    for stage_num in [1, 2]:
+        config = load_stage_config(stage_num)
+        for phase in config.get("phases", []):
+            for e in phase.get("experts", []):
+                pf = e.get("prompt_file", "")
+                if pf not in assigned_phases:
+                    assigned_phases[pf] = []
+                assigned_phases[pf].append(phase["id"])
+
+    experts = []
+    for path in sorted(prompts_dir.glob("*.md")):
+        expert_id = path.stem
+        content = path.read_text()
+        first_line = content.strip().split("\n")[0].replace("# ", "").strip()
+        prompt_file = f"prompts/experts/{path.name}"
+        experts.append({
+            "id": expert_id,
+            "role": first_line,
+            "prompt_file": prompt_file,
+            "assigned_phases": assigned_phases.get(prompt_file, []),
+        })
+    return JSONResponse({"experts": experts})
+
+
+@app.put("/api/council/phase/{phase_id}/experts")
+async def update_phase_experts(phase_id: str, req: UpdatePhaseExpertsRequest, stage: int = 1):
+    """Update the expert assignments for a phase."""
+    config_path = _stage_dir(stage) / "config" / "stage.yaml"
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    for phase in config["phases"]:
+        if phase["id"] == phase_id:
+            phase["experts"] = [
+                {"id": e["id"], "role": e["role"], "prompt_file": e["prompt_file"]}
+                for e in req.experts
+            ]
+            with open(config_path, "w") as f:
+                yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            return JSONResponse({"ok": True})
+
+    return JSONResponse({"error": "Phase not found"}, status_code=404)
+
+
 # ── Council: run with SSE streaming ──────────────────────────
 
 class RunCouncilRequest(BaseModel):
     phase_id: str | None = None
+    stage: int = 1
 
 
 @app.post("/api/council/run")
@@ -598,6 +1058,7 @@ async def run_council_start(req: RunCouncilRequest):
     jobs[job_id] = {
         "status": "starting",
         "phase_id": req.phase_id,
+        "stage": req.stage,
         "logs": [],
         "started_at": datetime.now().isoformat(),
         "experts_total": 0,
@@ -607,7 +1068,7 @@ async def run_council_start(req: RunCouncilRequest):
         "error": None,
     }
 
-    task = asyncio.create_task(_run_council_background(job_id, req.phase_id))
+    task = asyncio.create_task(_run_council_background(job_id, req.phase_id, req.stage))
     jobs[job_id]["_task"] = task
 
     return JSONResponse({"ok": True, "job_id": job_id})
@@ -631,9 +1092,9 @@ async def cancel_job(job_id: str):
     return JSONResponse({"ok": True})
 
 
-def _save_expert_result(expert_id: str, role: str, phase_id: str, content: str):
+def _save_expert_result(expert_id: str, role: str, phase_id: str, content: str, stage: int = 1):
     """Save a single expert result as its own JSON file for immediate access."""
-    output_dir = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts"
+    output_dir = PIPELINE_ROOT / STAGE_DIRS[stage] / "outputs" / "experts"
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{expert_id}.json"
     data = {
@@ -662,8 +1123,13 @@ async def _summarize_expert_output(expert_id: str):
     import importlib
     council_mod = importlib.import_module("pipeline.01_llm_council.council")
 
-    result_path = PIPELINE_ROOT / STAGE_DIRS[1] / "outputs" / "experts" / f"{expert_id}.json"
-    if not result_path.exists():
+    result_path = None
+    for s in [1, 2]:
+        p = _results_dir(s) / f"{expert_id}.json"
+        if p.exists():
+            result_path = p
+            break
+    if not result_path:
         return None
 
     data = json.loads(result_path.read_text())
@@ -691,14 +1157,136 @@ async def summarize_expert(expert_id: str):
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
-async def _run_council_background(job_id: str, phase_id: str | None):
+# ── Feedback loop: multi-model debate ────────────────────────
+
+feedback_loops: dict[str, dict] = {}
+
+
+class StartFeedbackLoopRequest(BaseModel):
+    max_rounds: int = 3
+
+
+@app.post("/api/council/expert/{expert_id}/feedback-loop")
+async def start_feedback_loop(expert_id: str, req: StartFeedbackLoopRequest):
+    """Start a multi-model feedback loop on an expert's output."""
+    # Find the expert result
+    result_path = None
+    for s in [1, 2]:
+        p = _results_dir(s) / f"{expert_id}.json"
+        if p.exists():
+            result_path = p
+            break
+    if not result_path:
+        return JSONResponse({"error": "No expert output to run feedback loop on"}, status_code=404)
+
+    data = json.loads(result_path.read_text())
+
+    loop_id = str(uuid.uuid4())[:8]
+    feedback_loops[loop_id] = {
+        "status": "running",
+        "expert_id": expert_id,
+        "expert_role": data["role"],
+        "max_rounds": req.max_rounds,
+        "events": [],
+        "result": None,
+        "error": None,
+    }
+
+    async def _run():
+        from pipeline.shared.services.feedback_loop import run_feedback_loop
+        loop = feedback_loops[loop_id]
+        try:
+            def on_event(evt):
+                loop["events"].append(evt)
+
+            result = await run_feedback_loop(
+                expert_output=data["content"],
+                expert_role=data["role"],
+                max_rounds=req.max_rounds,
+                on_event=on_event,
+            )
+            loop["result"] = result
+            loop["status"] = "complete"
+
+            # Save alongside expert result
+            loop_path = result_path.parent / f"{expert_id}_feedback_loop.json"
+            loop_path.write_text(json.dumps(result, indent=2, default=str))
+
+        except Exception as e:
+            loop["status"] = "error"
+            loop["error"] = str(e)
+            import traceback
+            loop["events"].append({"message": f"ERROR: {e}", "level": "error", "time": datetime.now().strftime("%H:%M:%S")})
+            traceback.print_exc()
+
+    asyncio.create_task(_run())
+    return JSONResponse({"ok": True, "loop_id": loop_id})
+
+
+@app.get("/api/council/expert/{expert_id}/feedback-loop")
+async def get_feedback_loop_result(expert_id: str):
+    """Get saved feedback loop result for an expert."""
+    for s in [1, 2]:
+        path = _results_dir(s) / f"{expert_id}_feedback_loop.json"
+        if path.exists():
+            data = json.loads(path.read_text())
+            return JSONResponse({"ok": True, "result": data})
+    return JSONResponse({"ok": True, "result": None})
+
+
+@app.get("/api/feedback-loops/{loop_id}/stream")
+async def stream_feedback_loop(loop_id: str):
+    """SSE stream of feedback loop progress."""
+    if loop_id not in feedback_loops:
+        return JSONResponse({"error": "Loop not found"}, status_code=404)
+
+    async def event_generator():
+        last_event_count = 0
+        while True:
+            loop = feedback_loops.get(loop_id)
+            if not loop:
+                break
+
+            events = loop["events"]
+            if len(events) > last_event_count:
+                for evt in events[last_event_count:]:
+                    data = json.dumps({
+                        "type": "log",
+                        "time": evt.get("time", ""),
+                        "message": evt.get("message", ""),
+                        "level": evt.get("level", "info"),
+                        "status": loop["status"],
+                    })
+                    yield f"data: {data}\n\n"
+                last_event_count = len(events)
+
+            if loop["status"] in ("complete", "error"):
+                data = json.dumps({
+                    "type": "done",
+                    "status": loop["status"],
+                    "error": loop.get("error"),
+                })
+                yield f"data: {data}\n\n"
+                break
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+async def _run_council_background(job_id: str, phase_id: str | None, stage: int = 1):
     """Run council in background, updating job state for SSE consumers."""
     import importlib
     council_mod = importlib.import_module("pipeline.01_llm_council.council")
 
     job = jobs[job_id]
     try:
-        council = council_mod.LLMCouncil()
+        council = council_mod.LLMCouncil(stage=stage)
+        council._load_prior_outputs()
 
         phases_to_run = council.phases
         if phase_id:
@@ -711,7 +1299,22 @@ async def _run_council_background(job_id: str, phase_id: str | None):
             job["phase_name"] = phase.name
             job["phase_id"] = phase.id
             is_parallel = phase.mode == "parallel"
-            _log(job, f"Phase: {phase.name} ({len(phase.experts)} experts, mode: {phase.mode})", level="phase")
+
+            # Read context_level from config
+            raw_config = load_stage_config(stage)
+            ctx_level = "none"
+            for pc in raw_config["phases"]:
+                if pc["id"] == phase.id:
+                    ctx_level = pc.get("context_level", "none")
+                    break
+
+            has_prior = phase.include_prior_stage_context and stage > 1
+            prior_label = f", prior stage context: {'ON' if has_prior else 'OFF'}" if stage > 1 else ""
+            _log(job, f"Phase: {phase.name} ({len(phase.experts)} experts, mode: {phase.mode}, context: {ctx_level}{prior_label})", level="phase")
+            if has_prior:
+                prior_count = sum(1 for o in council.outputs.values()
+                    if not any(o.phase_id == p.id for p in council.phases))
+                _log(job, f"Prior stage context: {prior_count} outputs loaded", level="info")
             if phase.previous_phase:
                 prev_count = sum(1 for o in council.outputs.values() if o.phase_id == phase.previous_phase)
                 _log(job, f"Context: {prev_count} outputs from {phase.previous_phase} phase", level="info")
@@ -726,12 +1329,12 @@ async def _run_council_background(job_id: str, phase_id: str | None):
                     job["current_expert"] = expert.role
                     _log(job, f"Starting: {expert.role}", level="start", expert=expert.id)
                     try:
-                        output = await council.run_expert(expert, phase, parallel=True)
+                        output = await council.run_expert(expert, phase, parallel=True, context_level=ctx_level)
                     finally:
                         if expert.id in job["running_experts"]:
                             job["running_experts"].remove(expert.id)
                     job["experts_done"] += 1
-                    _save_expert_result(expert.id, expert.role, phase.id, output.content)
+                    _save_expert_result(expert.id, expert.role, phase.id, output.content, stage=stage)
                     _log(job, f"Complete: {expert.role} ({len(output.content)} chars)", level="done", expert=expert.id)
                     return output
 
@@ -746,11 +1349,11 @@ async def _run_council_background(job_id: str, phase_id: str | None):
                     job["current_expert"] = expert.role
                     _log(job, f"[{idx+1}/{len(phase.experts)}] Starting: {expert.role} (sequential + intra-phase context)", level="start", expert=expert.id)
                     _log(job, f"Calling LLM: {council.llm_config['model']}...", level="info")
-                    output = await council.run_expert(expert, phase, include_intra_phase=True)
+                    output = await council.run_expert(expert, phase, include_intra_phase=True, context_level=ctx_level)
                     job["running_experts"] = []
                     results.append(output)
                     job["experts_done"] += 1
-                    _save_expert_result(expert.id, expert.role, phase.id, output.content)
+                    _save_expert_result(expert.id, expert.role, phase.id, output.content, stage=stage)
                     _log(job, f"Complete: {expert.role} ({len(output.content)} chars)", level="done", expert=expert.id)
 
             # Auto-summarize all completed experts
