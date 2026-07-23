@@ -1189,6 +1189,136 @@ async def synthesize_curated():
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
+# ── Synthesis feedback loop & guardian ────────────────────────
+
+@app.post("/api/synthesis/feedback-loop")
+async def start_synthesis_feedback_loop(req: StartFeedbackLoopRequest):
+    synth_path = _results_dir(2) / "_synthesis.json"
+    if not synth_path.exists():
+        return JSONResponse({"error": "No synthesis output"}, status_code=404)
+
+    data = json.loads(synth_path.read_text())
+    loop_id = str(uuid.uuid4())[:8]
+    feedback_loops[loop_id] = {
+        "status": "running", "expert_id": "_synthesis",
+        "expert_role": "Synthesis", "events": [], "result": None, "error": None,
+    }
+
+    async def _run():
+        from pipeline.shared.services.feedback_loop import run_feedback_loop
+        loop = feedback_loops[loop_id]
+        try:
+            def on_event(evt):
+                loop["events"].append(evt)
+            result = await run_feedback_loop(
+                expert_output=data["content"], expert_role="Synthesis",
+                max_rounds=req.max_rounds, on_event=on_event,
+            )
+            loop["result"] = result
+            loop["status"] = "complete"
+            loop_path = synth_path.parent / "_synthesis_feedback_loop.json"
+            loop_path.write_text(json.dumps(result, indent=2, default=str))
+        except Exception as e:
+            loop["status"] = "error"
+            loop["error"] = str(e)
+            import traceback
+            traceback.print_exc()
+
+    asyncio.create_task(_run())
+    return JSONResponse({"ok": True, "loop_id": loop_id})
+
+
+@app.get("/api/synthesis/feedback-loop")
+async def get_synthesis_feedback_loop():
+    path = _results_dir(2) / "_synthesis_feedback_loop.json"
+    if path.exists():
+        return JSONResponse({"ok": True, "result": json.loads(path.read_text())})
+    return JSONResponse({"ok": True, "result": None})
+
+
+@app.post("/api/synthesis/context-guardian")
+async def run_synthesis_guardian(req: RunGuardianRequest):
+    synth_path = _results_dir(2) / "_synthesis.json"
+    if not synth_path.exists():
+        return JSONResponse({"error": "No synthesis output"}, status_code=404)
+
+    data = json.loads(synth_path.read_text())
+
+    import importlib
+    import re as re_mod
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+    council = council_mod.LLMCouncil()
+
+    sections = []
+    for ctx_id in req.contexts:
+        if ctx_id.startswith("custom/"):
+            ctx_path = PIPELINE_ROOT / "01_llm_council" / "prompts" / "context" / "custom" / f"{ctx_id.split('/')[-1]}.md"
+        else:
+            ctx_path = PIPELINE_ROOT / "01_llm_council" / "prompts" / "context" / f"{ctx_id}.md"
+        if not ctx_path.exists():
+            continue
+        ctx_content = ctx_path.read_text()
+        ctx_name = ctx_id.replace("_", " ").replace("custom/", "").title()
+        try:
+            prompt = CONTEXT_GUARDIAN_PROMPT.format(context_name=ctx_name)
+            user_message = f"""## Reference Context: {ctx_name}\n\n{ctx_content}\n\n---\n\n## Synthesis Output to Evaluate\n\n{data['content']}\n\n---\n\nEvaluate this synthesis output against the reference context above. Return structured JSON."""
+            response = await council._call_llm(prompt, user_message)
+            text = response.strip()
+            match = re_mod.search(r"```(?:json)?\s*(.*?)\s*```", text, re_mod.DOTALL)
+            if match:
+                text = match.group(1)
+            section = json.loads(text)
+            section["context_name"] = ctx_name
+            section["context_id"] = ctx_id
+            sections.append(section)
+        except Exception as e:
+            sections.append({
+                "context_name": ctx_name, "context_id": ctx_id,
+                "score": 0, "error": str(e),
+                "strengths": [], "concerns": [], "suggestions": [], "missing_elements": [],
+            })
+
+    if req.custom_text.strip():
+        ctx_name = "Custom Context"
+        try:
+            prompt = CONTEXT_GUARDIAN_PROMPT.format(context_name=ctx_name)
+            user_message = f"""## Reference Context: {ctx_name}\n\n{req.custom_text}\n\n---\n\n## Synthesis Output to Evaluate\n\n{data['content']}\n\n---\n\nEvaluate this synthesis output against the reference context above. Return structured JSON."""
+            response = await council._call_llm(prompt, user_message)
+            text = response.strip()
+            match = re_mod.search(r"```(?:json)?\s*(.*?)\s*```", text, re_mod.DOTALL)
+            if match:
+                text = match.group(1)
+            section = json.loads(text)
+            section["context_name"] = ctx_name
+            section["context_id"] = "custom_inline"
+            sections.append(section)
+        except Exception as e:
+            sections.append({
+                "context_name": ctx_name, "context_id": "custom_inline",
+                "score": 0, "error": str(e),
+                "strengths": [], "concerns": [], "suggestions": [], "missing_elements": [],
+            })
+
+    result = {
+        "expert_id": "_synthesis",
+        "expert_role": "Synthesis",
+        "sections": sections,
+        "timestamp": datetime.now().isoformat(),
+    }
+    guardian_path = _results_dir(2) / "_synthesis_guardian.json"
+    guardian_path.parent.mkdir(parents=True, exist_ok=True)
+    guardian_path.write_text(json.dumps(result, indent=2))
+    return JSONResponse({"ok": True, "result": result})
+
+
+@app.get("/api/synthesis/context-guardian")
+async def get_synthesis_guardian():
+    path = _results_dir(2) / "_synthesis_guardian.json"
+    if path.exists():
+        return JSONResponse({"ok": True, "result": json.loads(path.read_text())})
+    return JSONResponse({"ok": True, "result": None})
+
+
 # ── Synthesis ────────────────────────────────────────────────
 
 @app.get("/api/council/synthesis")

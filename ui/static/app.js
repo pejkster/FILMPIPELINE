@@ -21,6 +21,10 @@ let researchContextMode = 'basic'; // 'basic' | 'custom'
 let customContextText = '';
 let basicContextText = '';
 
+let synthesisFeedback = null;
+let synthesisGuardian = null;
+let activeSynthesisTab = 'content'; // 'content' | 'feedback' | 'guardian'
+
 let dragData = null; // {expertId, role, prompt_file, fromPhase}
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -142,6 +146,22 @@ async function fetchAvailableContexts() {
   } catch(e) { availableContexts = []; }
 }
 
+async function fetchSynthesisFeedback() {
+  try {
+    const res = await fetch('/api/synthesis/feedback-loop');
+    const data = await res.json();
+    synthesisFeedback = data.result || null;
+  } catch(e) { synthesisFeedback = null; }
+}
+
+async function fetchSynthesisGuardian() {
+  try {
+    const res = await fetch('/api/synthesis/context-guardian');
+    const data = await res.json();
+    synthesisGuardian = data.result || null;
+  } catch(e) { synthesisGuardian = null; }
+}
+
 async function fetchActiveJobs() {
   try {
     const res = await fetch('/api/jobs/active');
@@ -180,6 +200,7 @@ async function init() {
   await Promise.all([
     fetchCouncilData(), fetchExpertResults(), fetchExpertRegistry(),
     fetchSynthesis(), fetchCuratedOutputs(), fetchFilmBrief(), fetchAvailableContexts(),
+    fetchSynthesisFeedback(), fetchSynthesisGuardian(),
   ]);
   await fetchActiveJobs();
   render();
@@ -772,8 +793,14 @@ function renderSynthesisColumn() {
 
   if (synthesisFull) {
     html += `<div class="synthesis-output">
-      <h4>Synthesis</h4>
-      <div class="synthesis-content" style="max-height:300px;overflow-y:auto">${renderMarkdown(synthesisFull)}</div>
+      <div class="output-tabs" style="margin-bottom:0.5rem">
+        <button class="tab-btn ${activeSynthesisTab === 'content' ? 'active' : ''}" onclick="setSynthesisTab('content')">Content</button>
+        <button class="tab-btn ${activeSynthesisTab === 'feedback' ? 'active' : ''}" onclick="setSynthesisTab('feedback')">Feedback Loop${synthesisFeedback ? ' ✓' : ''}</button>
+        <button class="tab-btn ${activeSynthesisTab === 'guardian' ? 'active' : ''}" onclick="setSynthesisTab('guardian')">Guardian${synthesisGuardian ? ' ✓' : ''}</button>
+      </div>
+      ${activeSynthesisTab === 'content' ? `<div class="synthesis-content" style="overflow-y:auto">${renderMarkdown(synthesisFull)}</div>` : ''}
+      ${activeSynthesisTab === 'feedback' ? renderSynthesisFeedbackTab() : ''}
+      ${activeSynthesisTab === 'guardian' ? renderSynthesisGuardianTab() : ''}
     </div>`;
   }
 
@@ -796,6 +823,118 @@ function renderSynthesisColumn() {
   }
 
   html += `</div>`;
+  return html;
+}
+
+function setSynthesisTab(tab) { activeSynthesisTab = tab; render(); }
+
+function renderSynthesisFeedbackTab() {
+  if (!synthesisFeedback) {
+    return `<div style="padding:0.75rem">
+      <p style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.75rem">Run a multi-model feedback loop on the synthesis &mdash; 6 AI models debate and refine the output.</p>
+      <button class="btn btn-primary" onclick="runSynthesisFeedbackLoop()">Run Feedback Loop</button>
+    </div>`;
+  }
+
+  let html = '';
+  const fl = synthesisFeedback;
+  if (fl.analysis) {
+    html += `<div style="padding:0.5rem">`;
+    if (fl.analysis.summary) {
+      html += `<div class="output-summary"><strong>Summary:</strong> ${escapeHtml(fl.analysis.summary)}</div>`;
+    }
+    const sections = [
+      { key: 'consensus_points', title: 'Consensus Points', color: 'var(--success)' },
+      { key: 'strongest_ideas', title: 'Strongest Ideas', color: 'var(--accent)' },
+      { key: 'similarities', title: 'Similarities', color: 'var(--text)', format: s => `${s.theme}: ${s.detail}` },
+      { key: 'differences', title: 'Differences & Tensions', color: 'var(--warning)', format: d => `${d.theme}: ${d.detail}` },
+    ];
+    for (const sec of sections) {
+      const items = fl.analysis[sec.key];
+      if (items?.length) {
+        html += `<div class="feedback-section"><h5 class="feedback-section-title" style="color:${sec.color}">${sec.title}</h5>`;
+        items.forEach(item => {
+          const text = sec.format ? sec.format(item) : item;
+          html += `<div class="feedback-card"><div class="feedback-card-text">${escapeHtml(text)}</div></div>`;
+        });
+        html += `</div>`;
+      }
+    }
+    html += `</div>`;
+  }
+
+  const lastRound = fl.rounds?.[fl.rounds.length - 1];
+  if (lastRound?.statements) {
+    html += `<details style="padding:0.5rem"><summary style="font-size:0.75rem;cursor:pointer;color:var(--text-muted)">Final Model Statements (${Object.keys(lastRound.statements).length})</summary>`;
+    for (const [mid, stmt] of Object.entries(lastRound.statements)) {
+      html += `<div class="fl-statement-card">
+        <div class="fl-statement-model">${escapeHtml(stmt.name)}</div>
+        <div class="fl-statement-text">${renderMarkdown(stmt.text)}</div>
+      </div>`;
+    }
+    html += `</details>`;
+  }
+
+  html += `<div style="padding:0.5rem"><button class="btn btn-sm" onclick="runSynthesisFeedbackLoop()">Re-run Feedback Loop</button></div>`;
+  return html;
+}
+
+function renderSynthesisGuardianTab() {
+  let html = `<div style="padding:0.75rem;border-bottom:1px solid var(--border)">
+    <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem">
+      <span style="font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;font-weight:600">Check against:</span>
+      ${availableContexts.map(ctx => `
+        <label style="display:flex;align-items:center;gap:0.25rem;font-size:0.72rem;cursor:pointer">
+          <input type="checkbox" class="synth-guardian-ctx-check" value="${escapeAttr(ctx.id)}"
+            ${['disordine','futurax'].includes(ctx.id) ? 'checked' : ''} style="accent-color:var(--accent)">
+          ${escapeHtml(ctx.name)}
+        </label>
+      `).join('')}
+    </div>
+    <details>
+      <summary style="font-size:0.7rem;color:var(--text-muted);cursor:pointer">Add custom context</summary>
+      <textarea id="synth-guardian-custom-ctx" rows="3" placeholder="Paste or type custom context here..."
+        style="width:100%;margin-top:0.35rem;padding:0.4rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.75rem;font-family:inherit;resize:vertical"></textarea>
+    </details>
+    <button class="btn btn-sm btn-primary" onclick="runSynthesisGuardian()" style="margin-top:0.5rem">
+      ${synthesisGuardian ? 'Re-run' : 'Run'} Context Guardian
+    </button>
+  </div>`;
+
+  if (!synthesisGuardian) {
+    html += `<div style="padding:0.75rem"><div class="empty-state"><p>Select contexts above and run the guardian to check synthesis alignment.</p></div></div>`;
+    return html;
+  }
+
+  if (synthesisGuardian.sections) {
+    for (const section of synthesisGuardian.sections) {
+      html += `<div style="padding:0.75rem;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">
+          <h5 style="font-size:0.8rem;color:var(--accent)">${escapeHtml(section.context_name)}</h5>
+          <span style="font-size:1.2rem;font-weight:700;${section.score >= 7 ? 'color:var(--success)' : section.score >= 4 ? 'color:var(--warning)' : 'color:var(--danger)'}">${section.score}/10</span>
+        </div>`;
+      if (section.error) {
+        html += `<div style="color:var(--danger);font-size:0.75rem">Error: ${escapeHtml(section.error)}</div>`;
+      } else {
+        const categories = [
+          { key: 'strengths', title: 'Strengths', color: 'var(--success)' },
+          { key: 'concerns', title: 'Concerns', color: 'var(--danger)' },
+          { key: 'suggestions', title: 'Suggestions', color: 'var(--info)' },
+          { key: 'missing_elements', title: 'Missing Elements', color: 'var(--warning)' },
+        ];
+        for (const cat of categories) {
+          if (section[cat.key]?.length) {
+            html += `<div class="feedback-section"><h5 class="feedback-section-title" style="color:${cat.color}">${cat.title}</h5>`;
+            section[cat.key].forEach(item => {
+              html += `<div class="feedback-card"><div class="feedback-card-text">${escapeHtml(item.text)}</div></div>`;
+            });
+            html += `</div>`;
+          }
+        }
+      }
+      html += `</div>`;
+    }
+  }
   return html;
 }
 
@@ -936,6 +1075,58 @@ async function runContextGuardian(expertId) {
       expertResults[expertId]._guardian = data.result;
       notify('Context Guardian analysis complete', 'done');
       activeOutputTab = 'guardian';
+      render();
+    } else notify(`Guardian error: ${data.error}`, 'error');
+  } catch(e) { notify(`Guardian error: ${e.message}`, 'error'); }
+}
+
+// ── Synthesis Feedback Loop & Guardian ──────────────────────
+
+async function runSynthesisFeedbackLoop() {
+  notify('Starting feedback loop on synthesis...', 'phase');
+  const res = await fetch('/api/synthesis/feedback-loop', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ max_rounds: 3 }),
+  });
+  const data = await res.json();
+  if (!data.ok) { notify('Failed to start synthesis feedback loop', 'error'); return; }
+
+  const evtSource = new EventSource(`/api/feedback-loops/${data.loop_id}/stream`);
+  evtSource.onmessage = async (event) => {
+    const evt = JSON.parse(event.data);
+    if (evt.type === 'log' && ['phase','done','error'].includes(evt.level)) {
+      notify(evt.message, evt.level === 'error' ? 'error' : 'info');
+    }
+    if (evt.type === 'done') {
+      evtSource.close();
+      await fetchSynthesisFeedback();
+      notify('Synthesis feedback loop complete', 'done');
+      activeSynthesisTab = 'feedback';
+      render();
+    }
+  };
+  evtSource.onerror = () => evtSource.close();
+}
+
+async function runSynthesisGuardian() {
+  const checkboxes = document.querySelectorAll('.synth-guardian-ctx-check:checked');
+  const contexts = Array.from(checkboxes).map(cb => cb.value);
+  const customText = document.getElementById('synth-guardian-custom-ctx')?.value || '';
+  if (contexts.length === 0 && !customText.trim()) {
+    notify('Select at least one context or provide custom text', 'error');
+    return;
+  }
+  notify(`Running Context Guardian on synthesis (${contexts.length} contexts)...`, 'phase');
+  try {
+    const res = await fetch('/api/synthesis/context-guardian', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contexts, custom_text: customText }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      synthesisGuardian = data.result;
+      notify('Synthesis Context Guardian complete', 'done');
+      activeSynthesisTab = 'guardian';
       render();
     } else notify(`Guardian error: ${data.error}`, 'error');
   } catch(e) { notify(`Guardian error: ${e.message}`, 'error'); }
@@ -1150,6 +1341,7 @@ async function resetAll() {
     await fetch('/api/curated/reset', { method: 'POST' });
     expertResults = {}; synthesisData = {}; curatedOutputs = [];
     synthesisFull = null; filmBrief = null; selectedOutputExpert = null;
+    synthesisFeedback = null; synthesisGuardian = null; activeSynthesisTab = 'content';
     revisionVault = {};
     notify('All outputs cleared', 'done');
     render();
