@@ -540,9 +540,6 @@ function renderOutputsColumn() {
 
     html += `<div class="col-body">`;
 
-    const vault = revisionVault[selectedOutputExpert] || [];
-    if (vault.length > 0) html += renderRevisionVault(selectedOutputExpert, vault);
-
     if (activeOutputTab === 'summary') html += renderSummaryTab(result);
     else if (activeOutputTab === 'full') html += renderFullTab(result);
     else if (activeOutputTab === 'feedback') html += renderFeedbackTab(selectedOutputExpert, result);
@@ -551,7 +548,45 @@ function renderOutputsColumn() {
     html += `</div>`;
   }
 
+  // Vault at bottom — aggregated across all experts
+  html += renderGlobalVault();
+
   return html;
+}
+
+function renderGlobalVault() {
+  const allItems = [];
+  for (const [expertId, items] of Object.entries(revisionVault)) {
+    for (const item of items) {
+      const expertName = expertResults[expertId]?.role || expertId;
+      allItems.push({ ...item, expertId, expertName });
+    }
+  }
+  if (allItems.length === 0) return '';
+
+  return `<div class="global-vault">
+    <details open>
+      <summary class="global-vault-header">
+        <span>Revision Vault (${allItems.length})</span>
+      </summary>
+      <div class="global-vault-items">
+        ${allItems.map(item => `
+          <div class="vault-item">
+            <div class="vault-item-meta">
+              <span class="vault-item-expert">${escapeHtml(item.expertName)}</span>
+              <span class="vault-item-source">${escapeHtml(item.source)}</span>
+            </div>
+            <div class="vault-item-text">${escapeHtml(item.text)}</div>
+            <button class="btn-icon" onclick="removeVaultItem('${item.expertId}', '${item.id}')" title="Remove">&times;</button>
+          </div>
+        `).join('')}
+      </div>
+      <div class="global-vault-actions">
+        ${selectedOutputExpert ? `<button class="btn btn-xs btn-primary" onclick="sendForRevision('${selectedOutputExpert}')">Revise ${escapeHtml(expertResults[selectedOutputExpert]?.role || 'Selected')}</button>` : ''}
+        <button class="btn btn-xs btn-ghost" onclick="clearAllVaults()">Clear All</button>
+      </div>
+    </details>
+  </div>`;
 }
 
 function renderSummaryTab(result) {
@@ -739,6 +774,7 @@ function removeVaultItem(expertId, itemId) {
 }
 
 function clearVault(expertId) { revisionVault[expertId] = []; render(); }
+function clearAllVaults() { revisionVault = {}; render(); }
 
 async function sendForRevision(expertId) {
   const vault = revisionVault[expertId] || [];

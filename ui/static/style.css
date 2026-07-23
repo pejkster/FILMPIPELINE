@@ -865,6 +865,31 @@ body {
   padding: 1px 5px; border-radius: 3px; flex-shrink: 0; white-space: nowrap; margin-top: 2px;
 }
 .vault-item-text { flex: 1; color: var(--text-muted); }
+.vault-item-meta {
+  display: flex; flex-direction: column; gap: 1px; flex-shrink: 0;
+}
+.vault-item-expert {
+  font-size: 0.6rem; color: var(--accent); font-weight: 600;
+}
+
+/* Global vault at bottom of output column */
+.global-vault {
+  border-top: 1px solid var(--border);
+  background: rgba(99,102,241,0.04);
+  flex-shrink: 0;
+}
+.global-vault-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.5rem 0.75rem; cursor: pointer;
+  font-size: 0.75rem; font-weight: 600; color: var(--accent);
+}
+.global-vault-items {
+  padding: 0 0.75rem; max-height: 200px; overflow-y: auto;
+}
+.global-vault-actions {
+  display: flex; gap: 0.35rem; padding: 0.4rem 0.75rem;
+  border-top: 1px solid rgba(99,102,241,0.1);
+}
 
 /* ── Responsive ──────────────────────────────────────────── */
 @media (max-width: 1200px) {
