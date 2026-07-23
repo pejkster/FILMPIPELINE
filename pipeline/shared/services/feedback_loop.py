@@ -96,25 +96,34 @@ ANALYSIS_PROMPT = """You are analyzing the final statements from {model_count} i
 
 {statements_block}
 
-**Your task:** Identify concrete similarities and differences across these statements. Be specific — name which models share a theme, quote or closely paraphrase repeated ideas, and point out where models diverge.
+**Your task:** Evaluate the original expert output based on the multi-model debate. Score the output's quality and provide structured feedback.
 
 **Output format:**
 
 ```json
 {{
-  "summary": "1-2 sentence overall takeaway about convergence/divergence",
-  "consensus_points": ["point 1", "point 2"],
-  "similarities": [
-    {{"theme": "short label", "detail": "specific explanation naming which models"}}
+  "summary": "1-2 sentence overall takeaway",
+  "score": 7,
+  "strengths": [
+    {{"id": "s1", "text": "Specific strength — what the models agreed works well"}},
+    {{"id": "s2", "text": "Another strength"}}
   ],
-  "differences": [
-    {{"theme": "short label", "detail": "specific explanation naming which models"}}
+  "concerns": [
+    {{"id": "c1", "text": "Specific concern — where models disagreed or flagged issues"}},
+    {{"id": "c2", "text": "Another concern"}}
   ],
-  "strongest_ideas": ["the most compelling specific ideas across all statements"]
+  "suggestions": [
+    {{"id": "sg1", "text": "Concrete actionable improvement based on the debate"}},
+    {{"id": "sg2", "text": "Another suggestion"}}
+  ],
+  "strongest_ideas": [
+    {{"id": "si1", "text": "The most compelling specific idea that emerged from the debate"}},
+    {{"id": "si2", "text": "Another strong idea"}}
+  ]
 }}
 ```
 
-Aim for 3-6 items in similarities and differences. Return only the JSON object."""
+Score 1-10 where 10 means the models unanimously validated the output. Aim for 3-6 items per section. Be specific — cite which models and what they said. Return only the JSON object."""
 
 
 def parse_json_response(text: str):

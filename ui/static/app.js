@@ -633,25 +633,29 @@ function renderFeedbackTab(expertId, result) {
   }
 
   if (fl.analysis) {
-    html += `<div style="padding:0.5rem">`;
-    if (fl.analysis.summary) {
-      html += `<div class="output-summary"><strong>Summary:</strong> ${escapeHtml(fl.analysis.summary)}</div>`;
-    }
-    const sections = [
-      { key: 'consensus_points', title: 'Consensus Points', color: 'var(--success)', prefix: 'fl_consensus' },
-      { key: 'strongest_ideas', title: 'Strongest Ideas', color: 'var(--accent)', prefix: 'fl_idea' },
-      { key: 'similarities', title: 'Similarities', color: 'var(--text)', prefix: 'fl_sim', format: s => `${s.theme}: ${s.detail}` },
-      { key: 'differences', title: 'Differences & Tensions', color: 'var(--warning)', prefix: 'fl_diff', format: d => `${d.theme}: ${d.detail}` },
+    const a = fl.analysis;
+    html += `<div style="padding:0.75rem;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">
+        <h5 style="font-size:0.8rem;color:var(--accent)">Multi-Model Analysis</h5>
+        <span style="font-size:1.2rem;font-weight:700;${(a.score||0) >= 7 ? 'color:var(--success)' : (a.score||0) >= 4 ? 'color:var(--warning)' : 'color:var(--danger)'}">${a.score || '?'}/10</span>
+      </div>
+      ${a.summary ? `<div class="output-summary" style="margin-bottom:0.5rem">${escapeHtml(a.summary)}</div>` : ''}`;
+
+    const categories = [
+      { key: 'strengths', title: 'Strengths', color: 'var(--success)' },
+      { key: 'concerns', title: 'Concerns', color: 'var(--danger)' },
+      { key: 'suggestions', title: 'Suggestions', color: 'var(--info)' },
+      { key: 'strongest_ideas', title: 'Strongest Ideas', color: 'var(--accent)' },
     ];
-    for (const sec of sections) {
-      const items = fl.analysis[sec.key];
+    for (const cat of categories) {
+      const items = a[cat.key];
       if (items?.length) {
-        html += `<div class="feedback-section"><h5 class="feedback-section-title" style="color:${sec.color}">${sec.title}</h5>`;
+        html += `<div class="feedback-section"><h5 class="feedback-section-title" style="color:${cat.color}">${cat.title}</h5>`;
         items.forEach((item, i) => {
-          const itemId = `${sec.prefix}_${i}`;
-          const text = sec.format ? sec.format(item) : item;
+          const itemId = item.id || `fl_${cat.key}_${i}`;
+          const text = typeof item === 'string' ? item : item.text || `${item.theme}: ${item.detail}`;
           const inVault = (revisionVault[expertId] || []).find(v => v.id === itemId);
-          html += renderFeedbackCard(expertId, itemId, text, `Feedback Loop &mdash; ${sec.title}`, inVault);
+          html += renderFeedbackCard(expertId, itemId, text, `Feedback Loop — ${cat.title}`, inVault);
         });
         html += `</div>`;
       }
@@ -893,23 +897,29 @@ function renderSynthesisFeedbackTab() {
   let html = '';
   const fl = synthesisFeedback;
   if (fl.analysis) {
-    html += `<div style="padding:0.5rem">`;
-    if (fl.analysis.summary) {
-      html += `<div class="output-summary"><strong>Summary:</strong> ${escapeHtml(fl.analysis.summary)}</div>`;
-    }
-    const sections = [
-      { key: 'consensus_points', title: 'Consensus Points', color: 'var(--success)' },
+    const a = fl.analysis;
+    html += `<div style="padding:0.75rem;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">
+        <h5 style="font-size:0.8rem;color:var(--accent)">Multi-Model Analysis</h5>
+        <span style="font-size:1.2rem;font-weight:700;${(a.score||0) >= 7 ? 'color:var(--success)' : (a.score||0) >= 4 ? 'color:var(--warning)' : 'color:var(--danger)'}">${a.score || '?'}/10</span>
+      </div>
+      ${a.summary ? `<div class="output-summary" style="margin-bottom:0.5rem">${escapeHtml(a.summary)}</div>` : ''}`;
+
+    const categories = [
+      { key: 'strengths', title: 'Strengths', color: 'var(--success)' },
+      { key: 'concerns', title: 'Concerns', color: 'var(--danger)' },
+      { key: 'suggestions', title: 'Suggestions', color: 'var(--info)' },
       { key: 'strongest_ideas', title: 'Strongest Ideas', color: 'var(--accent)' },
-      { key: 'similarities', title: 'Similarities', color: 'var(--text)', format: s => `${s.theme}: ${s.detail}` },
-      { key: 'differences', title: 'Differences & Tensions', color: 'var(--warning)', format: d => `${d.theme}: ${d.detail}` },
     ];
-    for (const sec of sections) {
-      const items = fl.analysis[sec.key];
+    for (const cat of categories) {
+      const items = a[cat.key];
       if (items?.length) {
-        html += `<div class="feedback-section"><h5 class="feedback-section-title" style="color:${sec.color}">${sec.title}</h5>`;
-        items.forEach(item => {
-          const text = sec.format ? sec.format(item) : item;
-          html += `<div class="feedback-card"><div class="feedback-card-text">${escapeHtml(text)}</div></div>`;
+        html += `<div class="feedback-section"><h5 class="feedback-section-title" style="color:${cat.color}">${cat.title}</h5>`;
+        items.forEach((item, i) => {
+          const itemId = item.id || `sfl_${cat.key}_${i}`;
+          const text = typeof item === 'string' ? item : item.text || `${item.theme}: ${item.detail}`;
+          const inVault = (revisionVault['_synthesis'] || []).find(v => v.id === itemId);
+          html += renderFeedbackCard('_synthesis', itemId, text, `Synthesis Feedback — ${cat.title}`, inVault);
         });
         html += `</div>`;
       }
