@@ -15,12 +15,12 @@ load_dotenv()
 FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 COUNCIL_MODELS = [
-    {"id": "anthropic-claude-opus-4-8", "name": "Claude Opus 4.8", "lab": "Anthropic", "thinking": "none"},
-    {"id": "openai-gpt-5-5", "name": "GPT-5.5", "lab": "OpenAI", "thinking": "none"},
+    {"id": "anthropic-claude-opus-4-8", "name": "Claude Opus 4.8", "lab": "Anthropic", "thinking": "off"},
+    {"id": "openai-gpt-5-5", "name": "GPT-5.5", "lab": "OpenAI", "thinking": "off"},
     {"id": "google-gemini-3-1-pro", "name": "Gemini 3.1 Pro", "lab": "Google", "thinking": "low"},
-    {"id": "xai-grok-4-3", "name": "Grok 4.3", "lab": "xAI", "thinking": "none"},
-    {"id": "alibaba-qwen3-coder-plus", "name": "Qwen 3 Coder Plus", "lab": "Alibaba", "thinking": "none"},
-    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "lab": "DeepSeek", "thinking": "none"},
+    {"id": "xai-grok-4-3", "name": "Grok 4.3", "lab": "xAI", "thinking": "off"},
+    {"id": "alibaba-qwen3-coder-plus", "name": "Qwen 3 Coder Plus", "lab": "Alibaba", "thinking": "off"},
+    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "lab": "DeepSeek", "thinking": "off"},
 ]
 
 LABELS = ["A", "B", "C", "D", "E"]
@@ -151,6 +151,20 @@ async def _call_model(model_id: str, user_message: str, system_prompt: str = "",
     return results[0].text
 
 
+async def _call_with_retry(model, prompt, emit, system_prompt="", max_attempts=4):
+    for attempt in range(max_attempts):
+        try:
+            return await _call_model(model["id"], prompt, system_prompt=system_prompt, thinking_level=model.get("thinking", "off"))
+        except Exception as e:
+            if "concurrentRequestLimitExceeded" in str(e) and attempt < max_attempts - 1:
+                wait = 15 * (attempt + 1)
+                emit(f"  {model['name']} rate limited, retrying in {wait}s...", level="info")
+                await asyncio.sleep(wait)
+            else:
+                emit(f"  {model['name']} FAILED: {e}", level="error")
+                return None
+
+
 async def run_feedback_loop(
     expert_output: str,
     expert_role: str,
@@ -186,23 +200,14 @@ async def run_feedback_loop(
     )
 
     statements = {}
-    tasks = []
     for model in models:
-        async def _call(m=model):
-            emit(f"  {m['name']} generating statement...", level="start")
-            try:
-                text = await _call_model(m["id"], round1_prompt, thinking_level=m.get("thinking", "none"))
-                emit(f"  {m['name']} done ({len(text)} chars)", level="done")
-                return m["id"], m["name"], text
-            except Exception as e:
-                emit(f"  {m['name']} FAILED: {e}", level="error")
-                return m["id"], m["name"], None
-        tasks.append(_call())
-
-    results_r1 = await asyncio.gather(*tasks)
-    for model_id, name, text in results_r1:
+        emit(f"  {model['name']} generating statement...", level="start")
+        text = await _call_with_retry(model, round1_prompt, emit)
         if text:
-            statements[model_id] = {"name": name, "text": text, "model_id": model_id}
+            emit(f"  {model['name']} done ({len(text)} chars)", level="done")
+            statements[model["id"]] = {"name": model["name"], "text": text, "model_id": model["id"]}
+        else:
+            emit(f"  {model['name']} FAILED after retries", level="error")
 
     emit(f"Round 1 complete: {len(statements)}/{len(models)} statements collected", level="done")
 
@@ -243,32 +248,24 @@ async def run_feedback_loop(
             )
 
             reviewer_model = next(m for m in models if m["id"] == reviewer_id)
-
-            async def _feedback(m=reviewer_model, p=prompt, lm=label_map):
-                emit(f"  {m['name']} reviewing peers...", level="start")
+            emit(f"  {reviewer_model['name']} reviewing peers...", level="start")
+            resp = await _call_with_retry(reviewer_model, prompt, emit)
+            mapped = []
+            if resp:
                 try:
-                    resp = await _call_model(m["id"], p, thinking_level=m.get("thinking", "none"))
                     reviews = parse_json_response(resp)
-                    mapped = []
                     for review in reviews:
-                        target_mid = lm.get(review.get("label"))
+                        target_mid = label_map.get(review.get("label"))
                         if target_mid:
                             mapped.append({
-                                "reviewer": m["name"],
+                                "reviewer": reviewer_model["name"],
                                 "target_model": target_mid,
                                 "score": review.get("score", 3),
                                 "feedback": review.get("feedback", ""),
                             })
-                    emit(f"  {m['name']} done reviewing", level="done")
-                    return m["id"], mapped
+                    emit(f"  {reviewer_model['name']} done reviewing", level="done")
                 except Exception as e:
-                    emit(f"  {m['name']} feedback failed: {e}", level="error")
-                    return m["id"], []
-
-            feedback_tasks.append(_feedback())
-
-        fb_results = await asyncio.gather(*feedback_tasks)
-        for reviewer_id, mapped in fb_results:
+                    emit(f"  {reviewer_model['name']} parse failed: {e}", level="error")
             all_feedback[reviewer_id] = mapped
 
         feedback_by_target = {}
@@ -286,7 +283,7 @@ async def run_feedback_loop(
         # Revision phase
         emit(f"Round {round_num}: Revision phase...", level="phase")
         any_major = False
-        revision_tasks = []
+        rev_results = []
 
         for model_id, model_data in statements.items():
             my_feedback = feedback_by_target.get(model_id, [])
@@ -305,23 +302,21 @@ async def run_feedback_loop(
             )
 
             rev_model = next(m for m in models if m["id"] == model_id)
-
-            async def _revise(m=rev_model, p=prompt):
-                emit(f"  {m['name']} considering revision...", level="start")
+            emit(f"  {rev_model['name']} considering revision...", level="start")
+            resp = await _call_with_retry(rev_model, prompt, emit)
+            if resp:
                 try:
-                    resp = await _call_model(m["id"], p, thinking_level=m.get("thinking", "none"))
                     rev = parse_json_response(resp)
                     score = rev.get("revision_score", 0)
                     label = ["unchanged", "minor revision", "MAJOR revision"][score]
-                    emit(f"  {m['name']}: {label} — {rev.get('rationale', '')[:80]}", level="done")
-                    return m["id"], rev
+                    emit(f"  {rev_model['name']}: {label} — {rev.get('rationale', '')[:80]}", level="done")
                 except Exception as e:
-                    emit(f"  {m['name']} revision parse failed: {e}", level="error")
-                    return m["id"], {"revision_score": 0, "statement": statements[m["id"]]["text"], "rationale": "Parse error"}
+                    emit(f"  {rev_model['name']} revision parse failed: {e}", level="error")
+                    rev = {"revision_score": 0, "statement": statements[model_id]["text"], "rationale": "Parse error"}
+            else:
+                rev = {"revision_score": 0, "statement": statements[model_id]["text"], "rationale": "Call failed"}
+            rev_results.append((model_id, rev))
 
-            revision_tasks.append(_revise())
-
-        rev_results = await asyncio.gather(*revision_tasks)
         revisions = {}
         all_unchanged = True
         for model_id, rev in rev_results:
@@ -371,7 +366,7 @@ async def run_feedback_loop(
     )
 
     try:
-        analysis_resp = await _call_model(COUNCIL_MODELS[0]["id"], analysis_prompt, thinking_level=COUNCIL_MODELS[0].get("thinking", "none"))
+        analysis_resp = await _call_model(COUNCIL_MODELS[0]["id"], analysis_prompt, thinking_level=COUNCIL_MODELS[0].get("thinking", "off"))
         analysis = parse_json_response(analysis_resp)
         result["analysis"] = analysis
         emit("Analysis complete", level="done")
