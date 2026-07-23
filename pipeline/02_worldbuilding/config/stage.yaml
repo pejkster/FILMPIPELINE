@@ -12,58 +12,34 @@ llm:
 phases:
 - id: worldbuilding
   name: World Design
-  description: Consolidate the brief and Disordine universe, then build the world
-    bible
+  description: "Build the complete world \u2014 bible, characters, environments, sensory\
+    \ palette, and visual language"
   mode: parallel
   context_level: disordine
   include_prior_stage_context: true
   checkpoint: true
   experts:
-  - id: vision_consolidator
-    role: Vision Consolidator
-    prompt_file: prompts/experts/vision_consolidator.md
   - id: world_bible_producer
     role: World Bible Producer
     prompt_file: prompts/experts/world_bible_producer.md
   - id: transition_historian
     role: Transition Historian
     prompt_file: prompts/experts/transition_historian.md
-  - id: lore_keeper_wb
-    role: Lore Keeper / Continuity Editor
-    prompt_file: prompts/experts/lore_keeper.md
-  - id: skeptic_wb
-    role: Skeptic / Red Team
-    prompt_file: prompts/experts/skeptic.md
-- id: characters
-  name: Characters & Culture
-  description: Design characters, daily life, relationships, and cultural context
-  mode: parallel
-  context_level: disordine
-  include_prior_stage_context: true
-  previous_phase: worldbuilding
-  checkpoint: true
-  experts:
   - id: character_architect
     role: Character Architect
     prompt_file: prompts/experts/character_architect.md
   - id: anthropologist_wb
     role: Cultural Anthropologist
     prompt_file: prompts/experts/anthropologist.md
-- id: environments
-  name: Environments & Senses
-  description: Design key locations, sensory palette, and visual language
-  mode: parallel
-  context_level: disordine
-  include_prior_stage_context: true
-  previous_phase: worldbuilding
-  checkpoint: true
-  experts:
   - id: environment_designer
     role: Environment Designer
     prompt_file: prompts/experts/environment_designer.md
   - id: sensory_designer
     role: Sensory Designer
     prompt_file: prompts/experts/sensory_designer.md
+  - id: psychologist
+    role: Psychologist
+    prompt_file: prompts/experts/psychologist.md
 style:
   aesthetic: grounded sci-fi, warm palette, organic architecture
   references: []

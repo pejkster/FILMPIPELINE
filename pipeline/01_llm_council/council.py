@@ -145,9 +145,12 @@ class LLMCouncil:
             return path.read_text().strip()
         return ""
 
-    def build_system_prompt(self, expert: ExpertConfig, context_level: str = "none") -> str:
+    def build_system_prompt(self, expert: ExpertConfig, context_level: str = "none", context_text: str = "") -> str:
         """Build the full system prompt: preamble + expert prompt."""
-        preamble = self._load_context_preamble(context_level)
+        if context_text:
+            preamble = context_text
+        else:
+            preamble = self._load_context_preamble(context_level)
         expert_prompt = self._load_prompt(expert.prompt_file)
         if preamble:
             return preamble + "\n\n---\n\n" + expert_prompt
@@ -253,12 +256,12 @@ class LLMCouncil:
     async def run_expert(
         self, expert: ExpertConfig, phase: PhaseConfig,
         include_intra_phase: bool = False, parallel: bool = False,
-        context_level: str = "none",
+        context_level: str = "none", context_text: str = "",
     ) -> ExpertOutput:
         """Run a single expert — load prompt, build context, call LLM."""
-        print(f"  [{expert.role}] Starting... (context: {context_level})")
+        print(f"  [{expert.role}] Starting... (context: {context_level or 'custom'})")
 
-        system_prompt = self.build_system_prompt(expert, context_level)
+        system_prompt = self.build_system_prompt(expert, context_level, context_text=context_text)
 
         # Cross-stage context (outputs from prior stages)
         phase_context = ""

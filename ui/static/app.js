@@ -1,1967 +1,1163 @@
-// ── Global state ────────────────────────────────────────────
-let pipelineData = null;
+// ── Global State ────────────────────────────────────────────
 let councilData = null;
-let selectedStage = null;
-let activeTab = 'generate';
-let currentJobId = null;
-let selectedExpert = null;
-let activeEvtSource = null;
 let expertResults = {};
-let synthesisData = {};  // keyed by stage
-let runningExperts = new Set();
+let synthesisData = {};
+let curatedOutputs = [];
+let synthesisFull = null;
+let filmBrief = null;
 let expertRegistry = null;
-let draggedExpert = null;
-let wbBriefs = null;
+let availableContexts = [];
 
-function getCouncilPhases(stage) {
-  const cd = councilData[stage];
-  return cd ? cd.phases : [];
+let currentJobId = null;
+let activeEvtSource = null;
+let runningExperts = new Set();
+
+let selectedOutputExpert = null;
+let selectedPhase = null;
+let activeOutputTab = 'summary';
+
+let revisionVault = {};
+let researchContextMode = 'basic'; // 'basic' | 'custom'
+let customContextText = '';
+let basicContextText = '';
+
+let dragData = null; // {expertId, role, prompt_file, fromPhase}
+
+// ── Helpers ─────────────────────────────────────────────────
+
+function escapeHtml(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-function currentStageHasCouncil() {
-  return selectedStage && councilData[selectedStage] && councilData[selectedStage].phases;
+function escapeAttr(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-function findPhaseAcrossStages(phaseId) {
-  for (const s of Object.keys(councilData)) {
-    const phase = councilData[s].phases.find(p => p.id === phaseId);
-    if (phase) return { phase, stage: parseInt(s) };
-  }
-  return null;
+function renderMarkdown(text) {
+  if (!text) return '';
+  return text
+    .replace(/^### (.+)$/gm, '<h5>$1</h5>')
+    .replace(/^## (.+)$/gm, '<h4>$1</h4>')
+    .replace(/^# (.+)$/gm, '<h3>$1</h3>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/^- (.+)$/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
+    .replace(/\n\n/g, '</p><p>')
+    .replace(/\n/g, '<br>');
 }
 
-const consoleLogs = [];
-let consoleStatus = null;
+function notify(msg, level = 'info') {
+  const container = document.getElementById('notifications');
+  if (!container) return;
+  const el = document.createElement('div');
+  el.className = `notification notification-${level}`;
+  el.innerHTML = `<span>${escapeHtml(msg)}</span>`;
+  container.appendChild(el);
+  setTimeout(() => { el.classList.add('fade-out'); setTimeout(() => el.remove(), 300); }, 4000);
+}
 
-async function fetchPipeline() {
-  const res = await fetch('/api/pipeline');
-  pipelineData = await res.json();
-  // Load council data for stages that have phases
+function getActiveContextText() {
+  if (researchContextMode === 'custom' && customContextText.trim()) return customContextText;
+  return '';
+}
+
+// ── Data Fetching ───────────────────────────────────────────
+
+async function fetchCouncilData() {
   councilData = {};
-  for (const s of pipelineData.stages) {
-    if (s.config && s.config.phases) {
-      const cRes = await fetch(`/api/council/phases?stage=${s.stage}`);
-      const cData = await cRes.json();
-      councilData[s.stage] = cData;
-    }
+  for (const stage of [1, 2]) {
+    try {
+      const res = await fetch(`/api/council/phases?stage=${stage}`);
+      councilData[stage] = await res.json();
+    } catch(e) {}
   }
-  await fetchExpertResults();
-  await fetchSynthesis();
-  await fetchBriefs();
-  await fetchExpertRegistry();
-  render();
 }
 
 async function fetchExpertResults() {
-  try {
-    expertResults = {};
-    for (const s of [1, 2]) {
-      const res = await fetch(`/api/council/results?stage=${s}`);
+  expertResults = {};
+  for (const stage of [1, 2]) {
+    try {
+      const res = await fetch(`/api/council/results?stage=${stage}`);
       const data = await res.json();
       for (const r of data.results) expertResults[r.expert_id] = r;
-    }
-  } catch (e) {}
-}
-
-async function fetchSynthesis() {
-  try {
-    for (const s of [1, 2]) {
-      const res = await fetch(`/api/council/synthesis?stage=${s}`);
-      const data = await res.json();
-      synthesisData[s] = data.synthesis;
-    }
-  } catch (e) {}
-}
-
-async function fetchBriefs() {
-  try {
-    const res = await fetch('/api/council/briefs?stage=2');
-    const data = await res.json();
-    wbBriefs = data.briefs;
-  } catch (e) {}
-}
-
-function render() {
-  renderStages();
-  renderExpertSidebar();
-  renderDetailPanel();
-}
-
-// ── Stage cards ─────────────────────────────────────────────
-
-function renderStages() {
-  const flow = document.getElementById('pipeline-flow');
-  flow.innerHTML = '';
-  pipelineData.stages.forEach((stage, i) => {
-    if (i > 0) {
-      const prev = pipelineData.stages[i - 1].status;
-      const c = document.createElement('div');
-      c.className = `pipeline-connector ${prev === 'approved' ? 'passed' : ''}`;
-      c.innerHTML = prev === 'approved' ? '→' : '⋯';
-      flow.appendChild(c);
-    }
-    const card = document.createElement('div');
-    card.className = 'stage-card';
-    if (selectedStage === stage.stage) card.style.borderColor = stage.color;
-    card.onclick = () => { selectedStage = stage.stage; selectedExpert = null; render(); };
-    card.innerHTML = `
-      <div class="stage-header">
-        <div class="stage-icon" style="background:${stage.color}20">${stage.icon}</div>
-        <div class="stage-info"><h2>Stage ${stage.stage}: ${stage.name}</h2><p>${stage.description}</p></div>
-      </div>
-      <div class="stage-body">
-        <span class="status-badge status-${stage.status}">${stage.status}</span>
-        <div class="stage-stats">
-          <div class="stat"><span class="stat-value">${stage.artifact_count}</span><span class="stat-label">Artifacts</span></div>
-          <div class="stat"><span class="stat-value">${stage.artifacts.filter(a=>a.approval==='approved').length}</span><span class="stat-label">Approved</span></div>
-          <div class="stat"><span class="stat-value">${stage.artifacts.filter(a=>a.approval==='pending').length}</span><span class="stat-label">Pending</span></div>
-        </div>
-      </div>`;
-    flow.appendChild(card);
-  });
-}
-
-// ── Detail panel ────────────────────────────────────────────
-
-function renderDetailPanel() {
-  const panel = document.getElementById('detail-content');
-  if (!selectedStage) {
-    panel.innerHTML = '<div class="empty-state"><div class="empty-icon">←</div><p>Select a stage to get started</p></div>';
-    return;
+    } catch(e) {}
   }
-  const stage = pipelineData.stages.find(s => s.stage === selectedStage);
-  const expertCount = Object.keys(expertResults).length;
-  let tabs;
-  if (selectedStage === 2) {
-    const charCount = stage.artifacts.filter(a => a.type === 'character_profile').length;
-    const envCount = stage.artifacts.filter(a => a.type === 'environment_spec').length;
-    tabs = [
-      { id: 'generate', label: 'Council' },
-      { id: 'wb-synthesis', label: 'Synthesis' },
-      { id: 'wb-characters', label: `Characters${charCount ? ` (${charCount})` : ''}` },
-      { id: 'wb-environments', label: `Environments${envCount ? ` (${envCount})` : ''}` },
-      { id: 'wb-styleguide', label: 'Style Guide' },
-      { id: 'progress', label: `Progress${expertCount > 0 ? ` (${expertCount})` : ''}` },
-      { id: 'config', label: 'Config' },
-    ];
-  } else {
-    tabs = [
-      { id: 'generate', label: currentStageHasCouncil() ? 'Council' : 'Generate' },
-      { id: 'progress', label: `Progress${expertCount > 0 ? ` (${expertCount})` : ''}` },
-      { id: 'artifacts', label: `Artifacts (${stage.artifact_count})` },
-      { id: 'config', label: 'Config' },
-    ];
+  for (const eid of Object.keys(expertResults)) {
+    try {
+      const gRes = await fetch(`/api/council/expert/${eid}/context-guardian`);
+      const gData = await gRes.json();
+      if (gData.result) expertResults[eid]._guardian = gData.result;
+    } catch(e) {}
+    try {
+      const fRes = await fetch(`/api/council/expert/${eid}/feedback-loop`);
+      const fData = await fRes.json();
+      if (fData.result) expertResults[eid]._feedbackResult = fData.result;
+    } catch(e) {}
   }
-  const tabsHtml = tabs.map(t =>
-    `<button class="tab ${activeTab === t.id ? 'active' : ''}" onclick="activeTab='${t.id}'; selectedExpert=null; render();">${t.label}</button>`
-  ).join('');
-
-  let contentHtml = '';
-  if (activeTab === 'generate') contentHtml = renderGeneratePanel(stage);
-  else if (activeTab === 'wb-synthesis') contentHtml = renderWBSynthesisPanel(stage);
-  else if (activeTab === 'wb-characters') contentHtml = renderWBCharactersPanel(stage);
-  else if (activeTab === 'wb-environments') contentHtml = renderWBEnvironmentsPanel(stage);
-  else if (activeTab === 'wb-styleguide') contentHtml = renderWBStyleGuidePanel(stage);
-  else if (activeTab === 'progress') contentHtml = renderProgressPanel(stage);
-  else if (activeTab === 'artifacts') contentHtml = renderArtifacts(stage);
-  else if (activeTab === 'config') contentHtml = `<div class="config-panel">${formatConfig(stage.config)}</div>`;
-
-  panel.innerHTML = `
-    <div class="detail-header">
-      <h3>${stage.icon} ${stage.name}</h3>
-      <span class="status-badge status-${stage.status}">${stage.status}</span>
-    </div>
-    <div class="tab-bar">${tabsHtml}</div>
-    <div id="tab-content">${contentHtml}</div>`;
-}
-
-// ── Notifications (replaced console) ────────────────────────
-
-function renderConsole() {}
-
-function consolePush(entry) {
-  consoleLogs.push(entry);
-  // Show important events as toasts
-  if (entry.level === 'done' || entry.level === 'error' || entry.level === 'phase') {
-    showNotification(entry.message, entry.level);
-  }
-}
-
-function clearConsole() { consoleLogs.length = 0; consoleStatus = null; }
-
-function showNotification(msg, level = 'info') {
-  const container = document.getElementById('notifications') || createNotificationContainer();
-  const el = document.createElement('div');
-  const icons = { phase: '▶', done: '●', error: '✕', info: '○' };
-  el.className = `notification notification-${level}`;
-  el.innerHTML = `<span class="notification-icon">${icons[level] || '○'}</span> ${escapeHtml(msg)}`;
-  container.appendChild(el);
-  setTimeout(() => { el.classList.add('fade-out'); setTimeout(() => el.remove(), 300); }, 5000);
-  // Keep max 6 notifications visible
-  while (container.children.length > 6) container.firstChild.remove();
-}
-
-function createNotificationContainer() {
-  const el = document.createElement('div');
-  el.id = 'notifications';
-  el.className = 'notification-container';
-  document.body.appendChild(el);
-  return el;
-}
-
-// ── Expert sidebar ────────────────────────────────────────
-
-function toggleExpertSidebar() {
-  const sidebar = document.getElementById('expert-sidebar');
-  const workspace = sidebar.closest('.workspace');
-  sidebar.classList.toggle('collapsed');
-  workspace.classList.toggle('sidebar-collapsed');
-  const btn = sidebar.querySelector('.sidebar-collapse-btn');
-  btn.textContent = sidebar.classList.contains('collapsed') ? '▶' : '◀';
-}
-
-// ── Generate panel ──────────────────────────────────────────
-
-function renderGeneratePanel(stage) {
-  if (currentStageHasCouncil()) return renderCouncilPanel();
-  if (stage.stage === 3) return renderProductionGenerate();
-  return '<div class="empty-state"><p>No generation panel for this stage.</p></div>';
-}
-
-function renderCouncilPanel() {
-  if (!currentStageHasCouncil()) return '<div class="generate-panel"><p>No council phases configured for this stage.</p></div>';
-  if (selectedExpert) return renderExpertDetail();
-
-  const allPhases = getCouncilPhases(selectedStage);
-  // For Stage 2, characters and environments have their own tabs
-  const WB_DEDICATED_PHASES = ['characters', 'environments'];
-  const phases = selectedStage === 2 ? allPhases.filter(p => !WB_DEDICATED_PHASES.includes(p.id)) : allPhases;
-
-  let html = '<div class="council-phases">';
-  phases.forEach((phase, i) => {
-    html += renderPhaseBlock(phase);
-    if (i < phases.length - 1) html += `<div class="council-connector ${phase.status === 'approved' ? 'passed' : ''}">${phase.status === 'approved' ? '↓' : '⋮'}</div>`;
-  });
-  return html + '</div>';
-}
-
-function renderPhaseBlock(phase, compact = false) {
-  const sc = { idle:'var(--text-muted)', pending:'var(--info)', approved:'var(--success)', rejected:'var(--danger)' };
-  const si = { idle:'○', pending:'◐', approved:'●', rejected:'✕' };
-  return `
-    <div class="council-phase phase-active">
-      <div class="phase-header">
-        <div class="phase-status" style="color:${sc[phase.status]}">${si[phase.status]}</div>
-        <div class="phase-title"><h4>${phase.name}</h4><p>${phase.description}</p></div>
-        <span class="status-badge status-${phase.status}">${phase.status}</span>
-      </div>
-      ${compact ? '' : `<div class="phase-mode-bar">
-        <span class="phase-mode-label">Mode:</span>
-        <button class="phase-mode-btn ${phase.mode === 'parallel' ? 'active' : ''}" onclick="event.stopPropagation(); setPhaseMode('${phase.id}', 'parallel')">Parallel</button>
-        <button class="phase-mode-btn ${phase.mode === 'sequential' ? 'active' : ''}" onclick="event.stopPropagation(); setPhaseMode('${phase.id}', 'sequential')">Sequential</button>
-        <span class="phase-mode-desc">${phase.mode === 'parallel' ? 'Experts run independently' : 'Experts chain sequentially'}</span>
-      </div>
-      <div class="phase-mode-bar">
-        <span class="phase-mode-label">Context:</span>
-        <select class="context-level-select" onchange="event.stopPropagation(); setContextLevel('${phase.id}', this.value)">
-          ${['none','basic','futurax','disordine'].map(l => `<option value="${l}" ${phase.context_level === l ? 'selected' : ''}>${l === 'none' ? 'None' : l === 'futurax' ? 'FuturaX' : l.charAt(0).toUpperCase() + l.slice(1)}</option>`).join('')}
-        </select>
-        <button class="btn-icon" onclick="event.stopPropagation(); previewContext('${phase.context_level || 'none'}')" title="Preview context preamble">👁</button>
-      </div>
-      ${selectedStage > 1 ? `<div class="phase-mode-bar">
-        <span class="phase-mode-label">Stage 1 Context:</span>
-        <button class="prior-context-toggle ${phase.include_prior_stage_context ? 'active' : ''}" onclick="event.stopPropagation(); togglePriorContext('${phase.id}', ${!phase.include_prior_stage_context})">
-          ${phase.include_prior_stage_context ? '✓ Included' : '✗ Off'}
-        </button>
-        <span class="phase-mode-desc">Feed outputs from previous stage into this phase's experts</span>
-      </div>` : ''}`}
-      <div class="phase-experts-drop" ondragover="event.preventDefault(); this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="dropToPhase(event, '${phase.id}', this)">
-        ${phase.experts.map(e => {
-          const done = !!expertResults[e.id];
-          const running = runningExperts.has(e.id);
-          const cls = running ? 'running' : done ? 'has-result' : '';
-          return `<span class="expert-chip clickable ${cls}" onclick="event.stopPropagation(); loadExpert('${e.id}')">
-            ${e.role}
-            <button class="expert-chip-remove" onclick="event.stopPropagation(); removeExpertFromPhase('${phase.id}', '${e.id}')" title="Remove from phase">×</button>
-          </span>`;
-        }).join('')}
-        ${phase.experts.length === 0 ? '<span class="registry-empty">Drag experts here from the sidebar</span>' : ''}
-      </div>
-      <div class="phase-actions">
-        <button class="btn btn-primary" onclick="event.stopPropagation(); runCouncilPhase('${phase.id}')" id="btn-phase-${phase.id}">${phase.status === 'idle' ? 'Run Phase' : 'Re-run'}</button>
-        ${phase.experts.some(e => expertResults[e.id]) ? `<button class="btn btn-sm" onclick="event.stopPropagation(); synthesizePhase('${phase.id}')" id="btn-synth-${phase.id}">Synthesize</button>` : ''}
-        ${currentJobId ? `<button class="btn btn-sm btn-danger-outline" onclick="event.stopPropagation(); stopGeneration()">Stop</button>` : ''}
-        ${phase.status === 'pending' && phase.checkpoint ? `<button class="btn btn-approve btn-sm" onclick="event.stopPropagation(); approvePhase('${phase.id}')">Approve</button>` : ''}
-      </div>
-    </div>`;
-}
-
-// ── Progress tab ────────────────────────────────────────────
-
-const collapsedPhases = new Set();
-
-function renderProgressPanel(stage) {
-  if (!currentStageHasCouncil()) return '<div class="empty-state"><p>No council phases for this stage.</p></div>';
-
-  const phases = getCouncilPhases(selectedStage);
-  const totalExperts = phases.reduce((s, p) => s + p.experts.length, 0);
-  const doneExperts = Object.keys(expertResults).length;
-
-  let html = '<div class="progress-panel">';
-
-  html += `<div class="progress-top-bar">
-    <span class="progress-overall">${doneExperts}/${totalExperts} experts complete</span>
-    <div class="progress-top-actions">
-      ${doneExperts > 0 ? `<button class="btn btn-sm btn-danger-outline" onclick="clearAllResults()">Clear All</button>` : ''}
-    </div>
-  </div>`;
-
-  getCouncilPhases(selectedStage).forEach(phase => {
-    const phaseDone = phase.experts.filter(e => !!expertResults[e.id]).length;
-    const collapsed = collapsedPhases.has(phase.id);
-    const chevron = collapsed ? '▸' : '▾';
-
-    html += `<div class="progress-phase ${collapsed ? 'collapsed' : ''}">
-      <div class="progress-phase-header" onclick="togglePhaseCollapse('${phase.id}')">
-        <div class="progress-phase-left">
-          <span class="phase-chevron">${chevron}</span>
-          <h4>${phase.name}</h4>
-          <span class="progress-count">${phaseDone}/${phase.experts.length}</span>
-        </div>
-        <div class="progress-phase-actions" onclick="event.stopPropagation()">
-          ${phaseDone > 0 ? `<button class="btn btn-sm btn-danger-outline" onclick="clearPhaseResults('${phase.id}')" title="Clear phase results">Clear</button>` : ''}
-        </div>
-      </div>`;
-
-    if (!collapsed) {
-      html += '<div class="progress-experts">';
-      phase.experts.forEach(e => {
-        const result = expertResults[e.id];
-        const isRunning = runningExperts.has(e.id);
-
-        if (result) {
-          const hasSummary = !!result.summary;
-          const summaryHtml = hasSummary
-            ? `<div class="progress-summary-llm" onclick="openExpertModal('${e.id}')">${renderMarkdown(result.summary)}</div>`
-            : `<div class="progress-summary-actions"><button class="btn btn-sm" onclick="event.stopPropagation(); summarizeExpert('${e.id}')">Generate Summary</button></div>`;
-          html += `
-            <div class="progress-expert done">
-              <div class="progress-expert-header">
-                <span class="progress-expert-name" onclick="openExpertModal('${e.id}')">${e.role}</span>
-                <div class="progress-expert-actions">
-                  <span class="progress-expert-meta">${result.content.length} chars</span>
-                  <button class="btn-icon" onclick="rerunExpert('${e.id}')" title="Rerun">↻</button>
-                  <button class="btn-icon btn-icon-danger" onclick="deleteExpertResult('${e.id}')" title="Delete">✕</button>
-                </div>
-              </div>
-              ${summaryHtml}
-            </div>`;
-        } else if (isRunning) {
-          html += `
-            <div class="progress-expert is-running">
-              <div class="progress-expert-header">
-                <span class="progress-expert-name">${e.role}</span>
-                <span class="progress-expert-meta">generating...</span>
-              </div>
-            </div>`;
-        } else {
-          html += `
-            <div class="progress-expert queued">
-              <div class="progress-expert-header">
-                <span class="progress-expert-name">${e.role}</span>
-                <div class="progress-expert-actions">
-                  <span class="progress-expert-meta">queued</span>
-                  <button class="btn-icon" onclick="rerunExpert('${e.id}')" title="Run this expert">▶</button>
-                </div>
-              </div>
-            </div>`;
-        }
-      });
-      html += '</div>';
-    }
-    html += '</div>';
-  });
-  return html + '</div>';
-}
-
-function togglePhaseCollapse(phaseId) {
-  if (collapsedPhases.has(phaseId)) collapsedPhases.delete(phaseId);
-  else collapsedPhases.add(phaseId);
-  render();
-}
-
-async function clearPhaseResults(phaseId) {
-  if (!confirm(`Clear all results for this phase?`)) return;
-  await fetch(`/api/council/results/clear/${phaseId}`, { method: 'POST' });
-  showToast('Phase results cleared');
-  await fetchPipeline();
-}
-
-async function deleteExpertResult(expertId) {
-  await fetch(`/api/council/results/${expertId}`, { method: 'DELETE' });
-  showToast('Expert result deleted');
-  await fetchPipeline();
-}
-
-async function summarizeExpert(expertId) {
-  showToast('Generating summary...');
-  try {
-    const res = await fetch(`/api/council/expert/${expertId}/summarize`, { method: 'POST' });
-    const data = await res.json();
-    if (data.ok) {
-      showToast('Summary generated');
-      await fetchExpertResults();
-      render();
-    } else {
-      showToast(`Error: ${data.error}`);
-    }
-  } catch (e) {
-    showToast(`Error: ${e.message}`);
-  }
-}
-
-async function rerunExpert(expertId, customPrompt = null) {
-  showToast('Rerunning expert...');
-  try {
-    const body = customPrompt ? { custom_prompt: customPrompt } : {};
-    const res = await fetch(`/api/council/expert/${expertId}/rerun`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-    });
-    const data = await res.json();
-    if (data.ok) {
-      showToast('Expert rerun complete');
-      await fetchExpertResults();
-      render();
-      if (document.getElementById('expert-modal').classList.contains('visible')) {
-        openExpertModal(expertId);
-      }
-    } else {
-      showToast(`Error: ${data.error}`);
-    }
-  } catch (e) {
-    showToast(`Error: ${e.message}`);
-  }
-}
-
-function extractSummary(content) {
-  // Extract section headers and their first substantive bullet/sentence
-  const lines = content.split('\n');
-  const items = [];
-  let currentHeader = null;
-
-  for (let i = 0; i < lines.length && items.length < 6; i++) {
-    const line = lines[i].trim();
-    if (line.startsWith('## ')) {
-      currentHeader = line.replace(/^#+\s*/, '');
-    } else if (currentHeader && line.length > 20 && !line.startsWith('#') && !line.startsWith('```')) {
-      // First substantive line after a header
-      let text = line.replace(/^[-*]\s*/, '').replace(/\*\*/g, '').replace(/\*/g, '');
-      if (text.length > 200) text = text.substring(0, 197) + '...';
-      items.push(`<li><strong>${escapeHtml(currentHeader)}:</strong> ${escapeHtml(text)}</li>`);
-      currentHeader = null;
-    }
-  }
-
-  if (items.length === 0) {
-    const meaningful = lines.filter(l => l.trim().length > 20).slice(0, 4);
-    return meaningful.map(l => { let t = l.trim(); if (t.length > 200) t = t.substring(0, 197) + '...'; return `<li>${escapeHtml(t)}</li>`; }).join('');
-  }
-  return items.join('');
-}
-
-async function clearAllResults() {
-  if (!confirm('Clear all expert results? This cannot be undone.')) return;
-  await fetch('/api/council/results/clear', { method: 'POST' });
-  showToast('Results cleared');
-  await fetchPipeline();
-}
-
-// ── Expert output modal ─────────────────────────────────────
-
-async function openExpertModal(expertId) {
-  const result = expertResults[expertId];
-  if (!result) return;
-
-  let meta = {};
-  try { const res = await fetch(`/api/council/expert/${expertId}`); meta = await res.json(); } catch(e) {}
-
-  let chatHistory = [];
-  try { const res = await fetch(`/api/council/expert/${expertId}/chat`); const d = await res.json(); chatHistory = d.history || []; } catch(e) {}
-
-  const summary = generateSmartSummary(result.content);
-  const modal = document.getElementById('expert-modal');
-  const body = document.getElementById('expert-modal-body');
-
-  const chatHtml = chatHistory.map(c => `
-    <div class="chat-msg chat-user"><div class="chat-bubble">${escapeHtml(c.user)}</div><span class="chat-time">${new Date(c.timestamp).toLocaleTimeString()}</span></div>
-    <div class="chat-msg chat-assistant"><div class="chat-bubble">${renderMarkdown(c.assistant)}</div></div>
-  `).join('');
-
-  body.innerHTML = `
-    <div class="modal-main">
-      <div class="modal-header-bar">
-        <div>
-          <h2 class="modal-title">${result.role}</h2>
-          <p class="modal-subtitle">Phase: ${meta.phase_name || result.phase_id} · ${result.content.length} chars · ${new Date(result.timestamp).toLocaleString()}</p>
-        </div>
-        <div class="modal-header-actions">
-          <button class="btn btn-sm" onclick="rerunExpertFromModal('${expertId}')" title="Rerun with current prompt">↻ Rerun</button>
-          <button class="btn btn-sm" onclick="closeExpertModal()">Close</button>
-        </div>
-      </div>
-      <div class="modal-tabs">
-        <button class="gen-tab active" onclick="showModalTab(this, 'modal-summary')">Summary</button>
-        <button class="gen-tab" onclick="showModalTab(this, 'modal-full')">Full Output</button>
-        <button class="gen-tab" onclick="showModalTab(this, 'modal-rerun')">Rerun with Prompt</button>
-        <button class="gen-tab" onclick="showModalTab(this, 'modal-feedback-loop')">Multi-Model Debate</button>
-      </div>
-      <div id="modal-summary" class="modal-content-area">
-        ${result.summary
-          ? `<div class="modal-summary-card"><div class="modal-summary-llm">${renderMarkdown(result.summary)}</div></div>`
-          : `<div class="modal-summary-card">
-              <div class="modal-summary-list">${summary}</div>
-              <div style="margin-top:1rem;"><button class="btn btn-primary btn-sm" onclick="summarizeExpertInModal('${expertId}')">Generate LLM Summary</button></div>
-            </div>`
-        }
-      </div>
-      <div id="modal-full" class="modal-content-area" style="display:none;">
-        <div class="modal-full-output">${renderMarkdown(result.content)}</div>
-      </div>
-      <div id="modal-rerun" class="modal-content-area" style="display:none;">
-        <div class="rerun-container">
-          <p class="rerun-desc">Write a custom prompt to rerun this expert with different instructions. Leave empty to rerun with the original prompt.</p>
-          <textarea id="rerun-prompt-${expertId}" class="rerun-prompt" rows="8" placeholder="Custom system prompt (optional)...">${escapeHtml(meta.prompt || '')}</textarea>
-          <div class="rerun-actions">
-            <button class="btn btn-primary" onclick="rerunExpertCustom('${expertId}')" id="btn-rerun-${expertId}">Rerun Expert</button>
-          </div>
-        </div>
-      </div>
-      <div id="modal-feedback-loop" class="modal-content-area" style="display:none;">
-        <div class="feedback-loop-container" id="fl-container-${expertId}">
-          <div class="fl-header">
-            <div class="fl-description">
-              <h4>Multi-Model Debate</h4>
-              <p>Run this expert's output through 6 different LLMs via OpenRouter. Each model produces its own statement, then they blind-review each other's work, score it (1-5), and revise iteratively until consensus or max rounds.</p>
-              <p class="fl-models-list">Models: Claude Opus 4.8, GPT-4.1, Gemini 2.5 Pro, Grok 3, Qwen 3 235B, DeepSeek R1</p>
-            </div>
-            <div class="fl-controls">
-              <label>Max rounds:</label>
-              <select id="fl-rounds-${expertId}">
-                <option value="1">1</option>
-                <option value="2">2</option>
-                <option value="3" selected>3</option>
-                <option value="5">5</option>
-                <option value="10">10</option>
-              </select>
-              <button class="btn btn-primary" id="fl-start-${expertId}" onclick="startFeedbackLoop('${expertId}')">Start Debate</button>
-            </div>
-          </div>
-          <div class="fl-monitor" id="fl-monitor-${expertId}" style="display:none;">
-            <div class="fl-monitor-header">
-              <span class="fl-status" id="fl-status-${expertId}">Running...</span>
-            </div>
-            <div class="fl-log" id="fl-log-${expertId}"></div>
-          </div>
-          <div class="fl-results" id="fl-results-${expertId}"></div>
-        </div>
-      </div>
-    </div>
-    <div class="modal-chat-side">
-      <div class="modal-chat-side-header">Chat with ${escapeHtml(result.role)}</div>
-      <div class="chat-messages" id="chat-messages-${expertId}">
-        ${chatHtml || '<div class="chat-empty">Ask questions, request clarifications, or add context.</div>'}
-      </div>
-      <div class="chat-input-bar">
-        <textarea id="chat-input-${expertId}" class="chat-input" rows="2" placeholder="Ask a question..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendExpertChat('${expertId}')}"></textarea>
-        <button class="btn btn-primary btn-sm" onclick="sendExpertChat('${expertId}')" id="btn-chat-${expertId}">Send</button>
-      </div>
-    </div>`;
-
-  modal.classList.add('visible');
-  modal.dataset.expertId = expertId;
-  initFeedbackLoopTab(expertId);
-}
-
-async function sendExpertChat(expertId) {
-  const input = document.getElementById(`chat-input-${expertId}`);
-  const btn = document.getElementById(`btn-chat-${expertId}`);
-  const msg = input.value.trim();
-  if (!msg) return;
-
-  btn.disabled = true; btn.textContent = 'Sending...';
-  const messagesEl = document.getElementById(`chat-messages-${expertId}`);
-  const emptyEl = messagesEl.querySelector('.chat-empty');
-  if (emptyEl) emptyEl.remove();
-
-  messagesEl.innerHTML += `<div class="chat-msg chat-user"><div class="chat-bubble">${escapeHtml(msg)}</div></div>
-    <div class="chat-msg chat-assistant chat-loading"><div class="chat-bubble">Thinking...</div></div>`;
-  messagesEl.scrollTop = messagesEl.scrollHeight;
-  input.value = '';
-
-  try {
-    const res = await fetch(`/api/council/expert/${expertId}/chat`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: msg })
-    });
-    const data = await res.json();
-    const loadingEl = messagesEl.querySelector('.chat-loading');
-    if (loadingEl) loadingEl.remove();
-
-    if (data.ok) {
-      messagesEl.innerHTML += `<div class="chat-msg chat-assistant"><div class="chat-bubble">${renderMarkdown(data.response)}</div></div>`;
-    } else {
-      messagesEl.innerHTML += `<div class="chat-msg chat-error"><div class="chat-bubble">Error: ${escapeHtml(data.error)}</div></div>`;
-    }
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-  } catch (e) {
-    const loadingEl = messagesEl.querySelector('.chat-loading');
-    if (loadingEl) loadingEl.remove();
-    messagesEl.innerHTML += `<div class="chat-msg chat-error"><div class="chat-bubble">Error: ${escapeHtml(e.message)}</div></div>`;
-  } finally {
-    btn.disabled = false; btn.textContent = 'Send';
-  }
-}
-
-async function summarizeExpertInModal(expertId) {
-  showToast('Generating summary...');
-  await summarizeExpert(expertId);
-  openExpertModal(expertId);
-}
-
-async function rerunExpertFromModal(expertId) {
-  showToast('Rerunning expert...');
-  await rerunExpert(expertId);
-}
-
-async function rerunExpertCustom(expertId) {
-  const textarea = document.getElementById(`rerun-prompt-${expertId}`);
-  const btn = document.getElementById(`btn-rerun-${expertId}`);
-  const customPrompt = textarea.value.trim() || null;
-
-  btn.disabled = true; btn.textContent = 'Running...';
-  try {
-    await rerunExpert(expertId, customPrompt);
-  } finally {
-    btn.disabled = false; btn.textContent = 'Rerun Expert';
-  }
-}
-
-function closeExpertModal() { document.getElementById('expert-modal').classList.remove('visible'); }
-
-function showModalTab(btn, tabId) {
-  const main = document.querySelector('.modal-main');
-  main.querySelectorAll('.modal-content-area').forEach(el => el.style.display = 'none');
-  main.querySelectorAll('.gen-tab').forEach(el => el.classList.remove('active'));
-  btn.classList.add('active');
-  document.getElementById(tabId).style.display = 'block';
-}
-
-// ── Feedback Loop (Multi-Model Debate) ─────────────────────
-
-async function startFeedbackLoop(expertId) {
-  const roundsEl = document.getElementById(`fl-rounds-${expertId}`);
-  const startBtn = document.getElementById(`fl-start-${expertId}`);
-  const monitorEl = document.getElementById(`fl-monitor-${expertId}`);
-  const logEl = document.getElementById(`fl-log-${expertId}`);
-  const statusEl = document.getElementById(`fl-status-${expertId}`);
-  const resultsEl = document.getElementById(`fl-results-${expertId}`);
-
-  const maxRounds = parseInt(roundsEl.value);
-  startBtn.disabled = true;
-  startBtn.textContent = 'Starting...';
-  monitorEl.style.display = '';
-  logEl.innerHTML = '';
-  resultsEl.innerHTML = '';
-  statusEl.textContent = 'Starting...';
-  statusEl.className = 'fl-status fl-running';
-
-  try {
-    const res = await fetch(`/api/council/expert/${expertId}/feedback-loop`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ max_rounds: maxRounds })
-    });
-    const data = await res.json();
-    if (!data.ok) {
-      showToast(`Error: ${data.error}`);
-      startBtn.disabled = false; startBtn.textContent = 'Start Debate';
-      return;
-    }
-
-    // Stream events
-    const evtSource = new EventSource(`/api/feedback-loops/${data.loop_id}/stream`);
-    evtSource.onmessage = (event) => {
-      const evt = JSON.parse(event.data);
-      if (evt.type === 'log') {
-        const icons = { phase: '▶ ', start: '  ◦ ', done: '  ● ', error: '  ✕ ', info: '  ' };
-        const line = document.createElement('div');
-        line.className = `fl-log-line fl-${evt.level || 'info'}`;
-        line.innerHTML = `<span class="fl-log-time">${evt.time}</span>${icons[evt.level] || '  '}${escapeHtml(evt.message)}`;
-        logEl.appendChild(line);
-        logEl.scrollTop = logEl.scrollHeight;
-        statusEl.textContent = evt.message;
-      }
-      if (evt.type === 'done') {
-        evtSource.close();
-        statusEl.textContent = evt.status === 'complete' ? 'Complete' : `Error: ${evt.error || 'Unknown'}`;
-        statusEl.className = `fl-status ${evt.status === 'complete' ? 'fl-complete' : 'fl-error'}`;
-        startBtn.disabled = false; startBtn.textContent = 'Re-run Debate';
-        if (evt.status === 'complete') loadFeedbackLoopResults(expertId);
-      }
-    };
-    evtSource.onerror = () => {
-      evtSource.close();
-      statusEl.textContent = 'Connection lost';
-      statusEl.className = 'fl-status fl-error';
-      startBtn.disabled = false; startBtn.textContent = 'Start Debate';
-    };
-  } catch (e) {
-    showToast(`Error: ${e.message}`);
-    startBtn.disabled = false; startBtn.textContent = 'Start Debate';
-  }
-}
-
-async function loadFeedbackLoopResults(expertId) {
-  const resultsEl = document.getElementById(`fl-results-${expertId}`);
-  if (!resultsEl) return;
-
-  try {
-    const res = await fetch(`/api/council/expert/${expertId}/feedback-loop`);
-    const data = await res.json();
-    if (!data.result) { resultsEl.innerHTML = ''; return; }
-
-    const r = data.result;
-    let html = '';
-
-    // Analysis summary
-    if (r.analysis) {
-      html += `<div class="fl-analysis">
-        <h4>Analysis</h4>
-        <p class="fl-analysis-summary">${escapeHtml(r.analysis.summary || '')}</p>`;
-
-      if (r.analysis.consensus_points && r.analysis.consensus_points.length) {
-        html += '<div class="fl-section"><h5>Consensus Points</h5><ul>';
-        r.analysis.consensus_points.forEach(p => { html += `<li>${escapeHtml(p)}</li>`; });
-        html += '</ul></div>';
-      }
-
-      if (r.analysis.strongest_ideas && r.analysis.strongest_ideas.length) {
-        html += '<div class="fl-section"><h5>Strongest Ideas</h5><ul>';
-        r.analysis.strongest_ideas.forEach(p => { html += `<li>${escapeHtml(p)}</li>`; });
-        html += '</ul></div>';
-      }
-
-      if (r.analysis.similarities && r.analysis.similarities.length) {
-        html += '<div class="fl-section"><h5>Similarities</h5>';
-        r.analysis.similarities.forEach(s => {
-          html += `<div class="fl-finding"><span class="fl-finding-theme">${escapeHtml(s.theme)}</span> ${escapeHtml(s.detail)}</div>`;
-        });
-        html += '</div>';
-      }
-      if (r.analysis.differences && r.analysis.differences.length) {
-        html += '<div class="fl-section"><h5>Differences</h5>';
-        r.analysis.differences.forEach(d => {
-          html += `<div class="fl-finding"><span class="fl-finding-theme">${escapeHtml(d.theme)}</span> ${escapeHtml(d.detail)}</div>`;
-        });
-        html += '</div>';
-      }
-      html += '</div>';
-    }
-
-    // Final statements per model
-    const lastRound = r.rounds[r.rounds.length - 1];
-    if (lastRound && lastRound.statements) {
-      html += '<div class="fl-statements"><h4>Final Statements (Round ' + lastRound.round + ')</h4>';
-      for (const [mid, s] of Object.entries(lastRound.statements)) {
-        html += `<div class="fl-statement-card">
-          <div class="fl-statement-model">${escapeHtml(s.name)}</div>
-          <div class="fl-statement-text">${renderMarkdown(s.text)}</div>
-        </div>`;
-      }
-      html += '</div>';
-    }
-
-    // Round-by-round feedback details (collapsible)
-    if (r.rounds.length > 1) {
-      html += '<div class="fl-rounds-detail"><h4>Round-by-Round Detail</h4>';
-      r.rounds.forEach((round, i) => {
-        if (!round.feedback || Object.keys(round.feedback).length === 0) return;
-        html += `<details class="fl-round-detail"><summary>Round ${round.round} Feedback</summary>`;
-        for (const [mid, feedbacks] of Object.entries(round.feedback)) {
-          if (!feedbacks.length) continue;
-          const avgScore = (feedbacks.reduce((s, f) => s + f.score, 0) / feedbacks.length).toFixed(1);
-          html += `<div class="fl-feedback-group">
-            <div class="fl-feedback-target">Feedback for: ${escapeHtml(lastRound.statements[mid]?.name || mid)} (avg: ${avgScore}/5)</div>`;
-          feedbacks.forEach(fb => {
-            html += `<div class="fl-feedback-item">
-              <span class="fl-score fl-score-${fb.score}">${fb.score}/5</span>
-              <span class="fl-reviewer">${escapeHtml(fb.reviewer)}</span>
-              <span class="fl-feedback-text">${escapeHtml(fb.feedback)}</span>
-            </div>`;
-          });
-          html += '</div>';
-        }
-
-        // Revisions
-        if (round.revisions && Object.keys(round.revisions).length) {
-          html += '<div class="fl-revisions">';
-          for (const [mid, rev] of Object.entries(round.revisions)) {
-            const labels = ['Unchanged', 'Minor', 'Major'];
-            const cls = ['unchanged', 'minor', 'major'];
-            const score = rev.revision_score || 0;
-            html += `<div class="fl-revision-item">
-              <span class="fl-revision-badge fl-rev-${cls[score]}">${labels[score]}</span>
-              <span class="fl-revision-model">${escapeHtml(lastRound.statements[mid]?.name || mid)}</span>
-              ${rev.rationale ? `<span class="fl-revision-rationale">${escapeHtml(rev.rationale)}</span>` : ''}
-            </div>`;
-          }
-          html += '</div>';
-        }
-        html += '</details>';
-      });
-      html += '</div>';
-    }
-
-    resultsEl.innerHTML = html;
-
-    // Also show the monitor if there are results but no active stream
-    const monitorEl = document.getElementById(`fl-monitor-${expertId}`);
-    if (monitorEl) monitorEl.style.display = '';
-
-  } catch (e) { console.error('Failed to load feedback loop results:', e); }
-}
-
-// Load existing feedback loop results when modal opens
-async function initFeedbackLoopTab(expertId) {
-  const resultsEl = document.getElementById(`fl-results-${expertId}`);
-  if (!resultsEl) return;
-  try {
-    const res = await fetch(`/api/council/expert/${expertId}/feedback-loop`);
-    const data = await res.json();
-    if (data.result) {
-      loadFeedbackLoopResults(expertId);
-      const statusEl = document.getElementById(`fl-status-${expertId}`);
-      const monitorEl = document.getElementById(`fl-monitor-${expertId}`);
-      if (statusEl) { statusEl.textContent = 'Previous run available'; statusEl.className = 'fl-status fl-complete'; }
-      if (monitorEl) monitorEl.style.display = '';
-      const startBtn = document.getElementById(`fl-start-${expertId}`);
-      if (startBtn) startBtn.textContent = 'Re-run Debate';
-    }
-  } catch (e) {}
-}
-
-function generateSmartSummary(content) {
-  const lines = content.split('\n');
-  const sections = [];
-  let cur = null;
-
-  for (const line of lines) {
-    const t = line.trim();
-    if (t.startsWith('## ')) {
-      if (cur) sections.push(cur);
-      cur = { title: t.replace(/^#+\s*/, ''), point: null };
-    } else if (cur && !cur.point) {
-      const cleaned = t.replace(/^[-*]\s*/, '').replace(/\*\*/g, '').replace(/\*/g, '');
-      if (cleaned.length > 25) {
-        cur.point = cleaned.length > 250 ? cleaned.substring(0, 247) + '...' : cleaned;
-      }
-    }
-  }
-  if (cur) sections.push(cur);
-
-  if (sections.length === 0) {
-    const meaningful = lines.filter(l => l.trim().length > 20).slice(0, 5);
-    return meaningful.map(l => {
-      let t = l.trim();
-      if (t.length > 250) t = t.substring(0, 247) + '...';
-      return `<div class="summary-item">${escapeHtml(t)}</div>`;
-    }).join('');
-  }
-
-  let html = '';
-  for (const s of sections.slice(0, 8)) {
-    html += `<div class="summary-section">
-      <div class="summary-section-title">${escapeHtml(s.title)}</div>
-      ${s.point ? `<p class="summary-point">${escapeHtml(s.point)}</p>` : ''}
-    </div>`;
-  }
-  return html;
-}
-
-// ── Artifacts tab (restructured with cards) ─────────────────
-
-function renderArtifacts(stage) {
-  if (stage.stage !== 1) {
-    // Non-council stages keep the old artifact list
-    return renderArtifactList(stage);
-  }
-
-  // Council stage: show synthesis + expert cards
-  const expertCount = Object.keys(expertResults).length;
-  if (expertCount === 0) return '<div class="empty-state"><div class="empty-icon">📭</div><p>No results yet. Run a phase to generate content.</p></div>';
-
-  let html = '<div class="results-panel">';
-
-  // Synthesis section at top
-  html += '<div class="synthesis-section">';
-  const synth = synthesisData[1];
-  if (synth) {
-    html += `
-      <div class="synthesis-card">
-        <div class="synthesis-header">
-          <h4>Synthesis — Key Takeaways</h4>
-          <button class="btn btn-sm" onclick="runSynthesis(1)">Re-synthesize</button>
-        </div>
-        <div class="synthesis-content">${renderMarkdown(synth.content)}</div>
-      </div>`;
-  } else {
-    html += `
-      <div class="synthesis-card synthesis-empty">
-        <p>${expertCount} expert outputs ready for synthesis</p>
-        <button class="btn btn-primary" onclick="runSynthesis(1)" id="btn-synth">Generate Synthesis</button>
-      </div>`;
-  }
-  html += '</div>';
-
-  // Expert result cards grid
-  html += '<div class="results-grid">';
-  if (councilData) {
-    getCouncilPhases(selectedStage).forEach(phase => {
-      phase.experts.forEach(e => {
-        const result = expertResults[e.id];
-        if (!result) return;
-        const firstLine = result.content.split('\n').find(l => l.trim().length > 20);
-        const preview = firstLine ? firstLine.trim().replace(/^#+\s*/, '').replace(/\*\*/g, '').substring(0, 100) : '';
-        html += `
-          <div class="result-card" onclick="openExpertModal('${e.id}')">
-            <div class="result-card-header">
-              <span class="result-card-role">${e.role}</span>
-              <span class="result-card-phase">${phase.name}</span>
-            </div>
-            <p class="result-card-preview">${escapeHtml(preview)}...</p>
-            <div class="result-card-meta">${result.content.length} chars · ${new Date(result.timestamp).toLocaleTimeString()}</div>
-          </div>`;
-      });
-    });
-  }
-  html += '</div></div>';
-  return html;
-}
-
-function renderArtifactList(stage) {
-  if (stage.artifacts.length === 0) return '<div class="empty-state"><div class="empty-icon">📭</div><p>No artifacts yet.</p></div>';
-  let html = '<ul class="artifact-list">';
-  stage.artifacts.forEach(a => {
-    const created = new Date(a.created_at).toLocaleString();
-    const images = a.content?.images || a.content?.views || [];
-    const hasExperts = a.content?.expert_outputs?.length > 0;
-    const label = a.content?.label || a.content?.name || a.content?.phase_name || a.type;
-    html += `<li class="artifact-item-full">
-      <div class="artifact-row">
-        <div class="artifact-info"><span class="artifact-type">${label}</span><span class="artifact-meta">${a.type} · v${a.version} · ${created}</span></div>
-        <div style="display:flex;align-items:center;gap:0.75rem;">
-          <span class="status-badge status-${a.approval}">${a.approval}</span>
-          <div class="artifact-actions">
-            <button class="btn btn-sm btn-approve" onclick="updateArtifact(${stage.stage},'${a._filename}','approve')">✓</button>
-            <button class="btn btn-sm btn-revise" onclick="updateArtifact(${stage.stage},'${a._filename}','revision')">↻</button>
-            <button class="btn btn-sm btn-reject" onclick="updateArtifact(${stage.stage},'${a._filename}','reject')">✕</button>
-            <button class="btn btn-sm" onclick="deleteArtifact(${stage.stage},'${a._filename}')" style="color:var(--text-muted)">🗑</button>
-          </div>
-        </div>
-      </div>
-      ${images.length > 0 ? renderImageGrid(images) : ''}
-      ${hasExperts ? renderExpertOutputs(a.content.expert_outputs) : ''}
-    </li>`;
-  });
-  return html + '</ul>';
-}
-
-async function runSynthesis(stage = 1) {
-  const btn = document.getElementById('btn-synth');
-  if (btn) { btn.disabled = true; btn.textContent = 'Synthesizing...'; }
-  showToast('Running synthesis...');
-  try {
-    const res = await fetch(`/api/council/synthesize?stage=${stage}`, { method: 'POST' });
-    const data = await res.json();
-    if (data.ok) {
-      synthesisData[stage] = data.synthesis;
-      if (data.briefs) wbBriefs = data.briefs;
-      showToast('Synthesis complete' + (data.briefs ? ' — briefs extracted' : ''));
-      render();
-    } else {
-      showToast(`Error: ${data.error}`);
-    }
-  } catch (e) {
-    showToast(`Error: ${e.message}`);
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Generate Synthesis'; }
-  }
-}
-
-async function synthesizePhase(phaseId) {
-  const btn = document.getElementById(`btn-synth-${phaseId}`);
-  if (btn) { btn.disabled = true; btn.textContent = 'Synthesizing...'; }
-  const stg = selectedStage || 1;
-  showToast(`Synthesizing ${phaseId} phase...`);
-  try {
-    const res = await fetch(`/api/council/synthesize-phase?phase_id=${phaseId}&stage=${stg}`, { method: 'POST' });
-    const data = await res.json();
-    if (data.ok) {
-      showToast(`${phaseId} synthesis complete`);
-      // Open the synthesis in a modal
-      const modal = document.createElement('div');
-      modal.className = 'expert-modal-overlay';
-      modal.onclick = e => { if (e.target === modal) modal.remove(); };
-      modal.innerHTML = `<div class="expert-modal" style="max-width:750px">
-        <div class="modal-header"><h3>${data.synthesis.phase_name} — Synthesis</h3><button class="modal-close" onclick="this.closest('.expert-modal-overlay').remove()">×</button></div>
-        <div class="modal-body"><div class="synthesis-content">${renderMarkdown(data.synthesis.content)}</div></div>
-      </div>`;
-      document.body.appendChild(modal);
-    } else showToast(`Error: ${data.error}`);
-  } catch (e) { showToast(`Error: ${e.message}`); }
-  finally { if (btn) { btn.disabled = false; btn.textContent = 'Synthesize'; } }
-}
-
-function renderExpertOutputs(outputs) {
-  let html = '<div class="expert-outputs">';
-  outputs.forEach(o => {
-    const preview = o.content.substring(0, 200).replace(/[#*`]/g, '');
-    html += `<div class="expert-output-card" onclick="this.classList.toggle('expanded')">
-        <div class="expert-output-header"><span class="expert-output-role">${o.role}</span><span class="expert-output-meta">${o.content.length} chars</span></div>
-        <div class="expert-output-preview">${escapeHtml(preview)}...</div>
-        <div class="expert-output-full">${renderMarkdown(o.content)}</div>
-      </div>`;
-  });
-  return html + '</div>';
-}
-
-function renderImageGrid(images) {
-  let html = '<div class="image-grid">';
-  images.forEach(img => {
-    const url = img.url || img.imageURL; const label = img.view || '';
-    if (url) html += `<div class="image-thumb" onclick="openLightbox('${url}')"><img src="${url}" alt="${label}" loading="lazy">${label ? `<span class="image-label">${label}</span>` : ''}</div>`;
-  });
-  return html + '</div>';
-}
-
-// ── Expert detail (Council tab) ─────────────────────────────
-
-function renderExpertDetail() {
-  return `<div class="expert-detail" id="expert-detail-container"><div class="empty-state"><p>Loading...</p></div></div>`;
-}
-
-async function loadExpert(expertId) {
-  selectedExpert = expertId;
-  render();
-  const res = await fetch(`/api/council/expert/${expertId}`);
-  const data = await res.json();
-  const container = document.getElementById('expert-detail-container');
-  if (!container) return;
-  const result = expertResults[expertId];
-  const hasOutput = result && result.content;
-
-  container.innerHTML = `
-    <div class="expert-header-bar">
-      <button class="btn btn-sm" onclick="selectedExpert=null; render();">← Back</button>
-      <span class="status-badge status-${hasOutput ? 'approved' : 'idle'}">${hasOutput ? 'has output' : 'not run'}</span>
-    </div>
-    <div class="expert-title"><h3>${data.role}</h3>
-      <p class="gen-desc">Phase: ${data.phase_name} · Receives: ${data.receives.length ? data.receives.join(', ') : 'none (independent)'}</p>
-    </div>
-    <div class="expert-tabs">
-      <button class="gen-tab active" onclick="showExpertTab(this,'expert-prompt')">Prompt</button>
-      ${hasOutput ? '<button class="gen-tab" onclick="showExpertTab(this,\'expert-output\')">Output</button>' : ''}
-    </div>
-    <div id="expert-prompt" class="expert-content">
-      <div class="prompt-edit-bar">
-        <button class="btn btn-sm" id="btn-edit-prompt" onclick="togglePromptEdit()">Edit</button>
-        <button class="btn btn-sm btn-primary" id="btn-save-prompt" onclick="savePrompt('${expertId}')" style="display:none">Save Changes</button>
-        <button class="btn btn-sm" id="btn-cancel-prompt" onclick="cancelPromptEdit()" style="display:none">Cancel</button>
-      </div>
-      <div class="expert-prompt-text" id="prompt-view">${escapeHtml(data.prompt)}</div>
-      <textarea class="expert-prompt-edit" id="prompt-editor" style="display:none">${escapeHtml(data.prompt)}</textarea>
-    </div>
-    ${hasOutput ? `<div id="expert-output" class="expert-content" style="display:none;"><div class="expert-output-text">${renderMarkdown(result.content)}</div></div>` : ''}`;
-}
-
-function togglePromptEdit() {
-  document.getElementById('prompt-view').style.display = 'none';
-  document.getElementById('prompt-editor').style.display = 'block';
-  document.getElementById('btn-edit-prompt').style.display = 'none';
-  document.getElementById('btn-save-prompt').style.display = '';
-  document.getElementById('btn-cancel-prompt').style.display = '';
-}
-
-function cancelPromptEdit() {
-  document.getElementById('prompt-view').style.display = '';
-  document.getElementById('prompt-editor').style.display = 'none';
-  document.getElementById('btn-edit-prompt').style.display = '';
-  document.getElementById('btn-save-prompt').style.display = 'none';
-  document.getElementById('btn-cancel-prompt').style.display = 'none';
-}
-
-async function savePrompt(expertId) {
-  const content = document.getElementById('prompt-editor').value;
-  const btn = document.getElementById('btn-save-prompt');
-  btn.disabled = true; btn.textContent = 'Saving...';
-  try {
-    const res = await fetch(`/api/council/expert/${expertId}/prompt`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) });
-    const data = await res.json();
-    if (data.ok) { showToast('Prompt saved'); document.getElementById('prompt-view').textContent = content; cancelPromptEdit(); }
-    else showToast(`Error: ${data.error}`);
-  } finally { btn.disabled = false; btn.textContent = 'Save Changes'; }
-}
-
-function showExpertTab(btn, tabId) {
-  const c = document.getElementById('expert-detail-container');
-  c.querySelectorAll('.expert-content').forEach(el => el.style.display = 'none');
-  c.querySelectorAll('.gen-tab').forEach(el => el.classList.remove('active'));
-  btn.classList.add('active');
-  document.getElementById(tabId).style.display = 'block';
-}
-
-async function setPhaseMode(phaseId, mode) {
-  try {
-    const stg = selectedStage || 1;
-    const res = await fetch(`/api/council/phase/${phaseId}/mode?stage=${stg}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode })
-    });
-    const data = await res.json();
-    if (data.ok) {
-      showToast(`${phaseId} set to ${mode}`);
-      await fetchPipeline();
-    } else {
-      showToast(`Error: ${data.error}`);
-    }
-  } catch (e) {
-    showToast(`Error: ${e.message}`);
-  }
-}
-
-async function setContextLevel(phaseId, level) {
-  try {
-    const stg = selectedStage || 1;
-    const res = await fetch(`/api/council/phase/${phaseId}/context-level?stage=${stg}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ context_level: level })
-    });
-    const data = await res.json();
-    if (data.ok) {
-      showToast(`${phaseId} context → ${level}`);
-      await fetchPipeline();
-    } else showToast(`Error: ${data.error}`);
-  } catch (e) { showToast(`Error: ${e.message}`); }
-}
-
-async function togglePriorContext(phaseId, enabled) {
-  try {
-    const stg = selectedStage || 1;
-    const res = await fetch(`/api/council/phase/${phaseId}/prior-context?stage=${stg}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled })
-    });
-    const data = await res.json();
-    if (data.ok) {
-      showToast(`${phaseId} prior stage context → ${enabled ? 'ON' : 'OFF'}`);
-      await fetchPipeline();
-    } else showToast(`Error: ${data.error}`);
-  } catch (e) { showToast(`Error: ${e.message}`); }
-}
-
-async function previewContext(level) {
-  if (level === 'none') { showToast('No preamble for "none" context'); return; }
-  try {
-    const res = await fetch(`/api/council/context/${level}`);
-    const data = await res.json();
-    const modal = document.createElement('div');
-    modal.className = 'expert-modal-overlay';
-    modal.onclick = e => { if (e.target === modal) modal.remove(); };
-    modal.innerHTML = `<div class="expert-modal" style="max-width:700px">
-      <div class="modal-header"><h3>Context: ${level}</h3><button class="modal-close" onclick="this.closest('.expert-modal-overlay').remove()">×</button></div>
-      <div class="modal-body">
-        <textarea id="context-edit-area" style="width:100%;min-height:400px;font-family:monospace;font-size:13px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;padding:12px">${data.content.replace(/</g,'&lt;')}</textarea>
-        <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
-          <button class="btn btn-sm" onclick="this.closest('.expert-modal-overlay').remove()">Cancel</button>
-          <button class="btn btn-sm btn-primary" onclick="saveContext('${level}', document.getElementById('context-edit-area').value, this)">Save</button>
-        </div>
-      </div>
-    </div>`;
-    document.body.appendChild(modal);
-  } catch (e) { showToast(`Error: ${e.message}`); }
 }
 
 async function fetchExpertRegistry() {
+  const res = await fetch('/api/council/experts/registry');
+  const data = await res.json();
+  expertRegistry = data.experts;
+}
+
+async function fetchSynthesis() {
+  for (const stage of [1, 2]) {
+    try {
+      const res = await fetch(`/api/council/synthesis?stage=${stage}`);
+      const data = await res.json();
+      if (data.synthesis) synthesisData[stage] = data.synthesis;
+    } catch(e) {}
+  }
+}
+
+async function fetchCuratedOutputs() {
   try {
-    const res = await fetch('/api/council/experts/registry');
+    const res = await fetch('/api/curated');
+    curatedOutputs = (await res.json()).outputs || [];
+  } catch(e) { curatedOutputs = []; }
+}
+
+async function fetchFilmBrief() {
+  try {
+    const res = await fetch('/api/film-brief?stage=2');
+    filmBrief = (await res.json()).brief;
+  } catch(e) {}
+}
+
+async function fetchAvailableContexts() {
+  try {
+    const res = await fetch('/api/council/contexts');
     const data = await res.json();
-    expertRegistry = data.experts;
-  } catch (e) {}
+    availableContexts = data.contexts || [];
+    const basic = availableContexts.find(c => c.id === 'basic');
+    if (basic) {
+      basicContextText = basic.content || '';
+    }
+  } catch(e) { availableContexts = []; }
 }
 
-function renderExpertSidebar() {
-  const listEl = document.getElementById('expert-sidebar-list');
-  const countEl = document.getElementById('expert-sidebar-count');
-  if (!listEl || !expertRegistry) return;
-
-  countEl.innerHTML = `${expertRegistry.length} <button class="btn-add-expert" onclick="openCreateExpertModal()" title="Create new expert">+</button>`;
-
-  listEl.innerHTML = expertRegistry.map(e => {
-    const phases = e.assigned_phases || [];
-    const tagsHtml = phases.map(pid => `<span class="expert-phase-tag">${pid}</span>`).join('');
-    return `<div class="expert-sidebar-item" draggable="true"
-      ondragstart="startDrag(event, '${e.id}', '${escapeAttr(e.role)}', '${e.prompt_file}')"
-      onclick="openExpertPromptEditor('${e.id}', '${escapeAttr(e.role)}', '${e.prompt_file}')">
-      <span class="expert-drag-handle">⠿</span>
-      <span class="expert-name">${e.role}</span>
-      <span class="expert-phase-tags">${tagsHtml}</span>
-    </div>`;
-  }).join('');
+async function fetchActiveJobs() {
+  try {
+    const res = await fetch('/api/jobs/active');
+    const data = await res.json();
+    if (data.jobs?.length > 0) {
+      const job = data.jobs[0];
+      currentJobId = job.job_id;
+      runningExperts.clear();
+      for (const eid of (job.running_experts || [])) runningExperts.add(eid);
+      connectSSE(currentJobId);
+      render();
+    }
+  } catch(e) {}
 }
 
-function escapeAttr(s) { return s.replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+// Poll for active jobs periodically so we recover from SSE drops
+setInterval(async () => {
+  if (currentJobId) return;
+  try {
+    const res = await fetch('/api/jobs/active');
+    const data = await res.json();
+    if (data.jobs?.length > 0) {
+      const job = data.jobs[0];
+      currentJobId = job.job_id;
+      runningExperts.clear();
+      for (const eid of (job.running_experts || [])) runningExperts.add(eid);
+      connectSSE(currentJobId);
+      render();
+    }
+  } catch(e) {}
+}, 5000);
 
-function openExpertPromptEditor(expertId, role, promptFile) {
-  // Fetch and show prompt in a modal for viewing/editing
-  fetch(`/api/council/expert/${expertId}`)
-    .then(r => r.json())
-    .then(data => {
-      const modal = document.createElement('div');
-      modal.className = 'expert-modal-overlay';
-      modal.onclick = ev => { if (ev.target === modal) modal.remove(); };
-      const prompt = data.prompt || '';
-      modal.innerHTML = `<div class="expert-modal" style="max-width:750px">
-        <div class="modal-header">
-          <h3>${role}</h3>
-          <button class="modal-close" onclick="this.closest('.expert-modal-overlay').remove()">×</button>
+// ── Init ────────────────────────────────────────────────────
+
+async function init() {
+  await Promise.all([
+    fetchCouncilData(), fetchExpertResults(), fetchExpertRegistry(),
+    fetchSynthesis(), fetchCuratedOutputs(), fetchFilmBrief(), fetchAvailableContexts(),
+  ]);
+  await fetchActiveJobs();
+  render();
+}
+
+// ── Main Render ─────────────────────────────────────────────
+
+function render() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    <div class="workspace">
+      <div class="workspace-col">${renderResearchColumn()}</div>
+      <div class="workspace-col">${renderOutputsColumn()}</div>
+      <div class="workspace-col">${renderSynthesisColumn()}</div>
+    </div>
+  `;
+}
+
+// ── LEFT COLUMN: Research ───────────────────────────────────
+
+function getAllPhases() {
+  const phases = [];
+  const order = ['research', 'narrative', 'worldbuilding', 'treatment'];
+  for (const stage of [1, 2]) {
+    const cd = councilData[stage];
+    if (!cd?.phases) continue;
+    for (const p of cd.phases) phases.push({ ...p, stage });
+  }
+  phases.sort((a, b) => {
+    const ai = order.indexOf(a.id);
+    const bi = order.indexOf(b.id);
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+  });
+  return phases;
+}
+
+function getAllExperts() {
+  const experts = [];
+  for (const p of getAllPhases()) {
+    for (const e of p.experts) {
+      if (!experts.find(x => x.id === e.id))
+        experts.push({ ...e, phase_id: p.id, stage: p.stage });
+    }
+    for (const g of (p.guardians || [])) {
+      if (!experts.find(x => x.id === g.id))
+        experts.push({ ...g, phase_id: p.id, stage: p.stage, isGuardian: true });
+    }
+  }
+  return experts;
+}
+
+function renderResearchColumn() {
+  const phases = getAllPhases();
+  const allExperts = getAllExperts();
+  const doneCount = allExperts.filter(e => expertResults[e.id]).length;
+
+  let html = `
+    <div class="col-header">
+      <h3>Research <span class="col-count">${doneCount}/${allExperts.length}</span></h3>
+      <div style="display:flex;gap:0.25rem">
+        ${currentJobId
+          ? `<button class="btn btn-sm btn-danger-outline" onclick="stopGeneration()">Stop</button>`
+          : `<button class="btn btn-sm btn-primary" onclick="runAllPhases()">Run All</button>`}
+        <button class="btn btn-sm btn-ghost" onclick="openResetModal()">Reset</button>
+      </div>
+    </div>
+    <div class="col-body">
+  `;
+
+  // Context prompt window
+  html += renderContextPrompt();
+
+  // Phases
+  for (const phase of phases) {
+    const isExpanded = selectedPhase === phase.id;
+    const allPhaseMembers = [...phase.experts, ...(phase.guardians || [])];
+    const phaseDone = allPhaseMembers.filter(e => expertResults[e.id]).length;
+    const phaseRunning = allPhaseMembers.some(e => runningExperts.has(e.id));
+    const dotClass = phaseDone === allPhaseMembers.length && phaseDone > 0 ? 'done' : phaseRunning ? 'running' : phaseDone > 0 ? 'active' : '';
+
+    html += `<div class="phase-block" data-phase-id="${phase.id}" data-phase-stage="${phase.stage}">
+      <div class="phase-block-header" onclick="togglePhase('${phase.id}')">
+        <div class="phase-block-title">
+          <div class="phase-dot ${dotClass}"></div>
+          ${escapeHtml(phase.name)}
+          <span class="col-count">${phaseDone}/${allPhaseMembers.length}</span>
         </div>
-        <div class="modal-body">
-          <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:8px">${promptFile}</div>
-          <textarea id="expert-prompt-edit" style="width:100%;min-height:450px;font-family:monospace;font-size:13px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;padding:12px;resize:vertical">${prompt.replace(/</g,'&lt;')}</textarea>
-          <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center">
-            <div style="display:flex;gap:6px;align-items:center">
-              <span style="font-size:0.7rem;color:var(--text-muted)">Add to phase:</span>
-              ${councilData ? Object.entries(councilData).flatMap(([s, cd]) =>
-                cd.phases.map(p =>
-                  `<button class="btn btn-sm" onclick="addExpertToPhase('${p.id}','${expertId}','${escapeAttr(role)}','${promptFile}'); this.textContent='✓'; this.disabled=true">${p.name}</button>`
-                )
-              ).join('') : ''}
-            </div>
-            <div style="display:flex;gap:8px">
-              <button class="btn btn-sm" onclick="this.closest('.expert-modal-overlay').remove()">Cancel</button>
-              <button class="btn btn-sm btn-primary" onclick="saveExpertPrompt('${expertId}', document.getElementById('expert-prompt-edit').value, this)">Save Prompt</button>
-            </div>
+        <span style="font-size:0.6rem;color:var(--text-muted)">${phase.stage === 1 ? 'S1' : 'S2'}</span>
+      </div>`;
+
+    if (isExpanded) {
+      const guardians = phase.guardians || [];
+      const assignedExpertIds = new Set(phase.experts.map(e => e.id));
+      const assignedGuardianIds = new Set(guardians.map(g => g.id));
+      const availableExperts = (expertRegistry || []).filter(e => !e.is_guardian && !assignedExpertIds.has(e.id));
+      const availableGuardians = (expertRegistry || []).filter(e => e.is_guardian && !assignedGuardianIds.has(e.id));
+
+      html += `<div class="phase-block-body">
+        <div class="phase-slot-section">
+          <div class="phase-slot-header">
+            <span class="phase-slot-label">Experts</span>
+            <select class="phase-add-select" onchange="addFromDropdown(this, '${phase.id}', ${phase.stage}, 'experts')">
+              <option value="">+ Add expert...</option>
+              ${availableExperts.map(e => `<option value="${e.id}" data-role="${escapeAttr(e.role)}" data-pf="${escapeAttr(e.prompt_file)}">${escapeHtml(e.role)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="expert-chip-list">
+            ${phase.experts.map(e => {
+              const done = !!expertResults[e.id];
+              const running = runningExperts.has(e.id);
+              const cls = running ? 'running' : done ? 'has-result' : '';
+              return `<span class="expert-chip ${cls}" onclick="selectExpertOutput('${e.id}')">
+                ${escapeHtml(e.role)}
+                <button class="expert-chip-remove" onclick="event.stopPropagation(); removeExpertFromPhase('${phase.id}', '${e.id}', ${phase.stage}, 'experts')">&times;</button>
+              </span>`;
+            }).join('')}
           </div>
         </div>
+        <div class="phase-slot-section guardian-section">
+          <div class="phase-slot-header">
+            <span class="phase-slot-label guardian-label">Guardians</span>
+            <select class="phase-add-select guardian-select" onchange="addFromDropdown(this, '${phase.id}', ${phase.stage}, 'guardians')">
+              <option value="">+ Add guardian...</option>
+              ${availableGuardians.map(e => `<option value="${e.id}" data-role="${escapeAttr(e.role)}" data-pf="${escapeAttr(e.prompt_file)}">${escapeHtml(e.role)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="guardian-chip-list">
+            ${guardians.map(g => {
+              const done = !!expertResults[g.id];
+              const running = runningExperts.has(g.id);
+              const cls = running ? 'running' : done ? 'has-result' : '';
+              return `<span class="expert-chip guardian-chip ${cls}" onclick="selectExpertOutput('${g.id}')">
+                ${escapeHtml(g.role)}
+                <button class="expert-chip-remove" onclick="event.stopPropagation(); removeExpertFromPhase('${phase.id}', '${g.id}', ${phase.stage}, 'guardians')">&times;</button>
+              </span>`;
+            }).join('')}
+          </div>
+        </div>
+        <div class="phase-actions">
+          <button class="btn btn-sm btn-primary" onclick="runPhase('${phase.id}', ${phase.stage})" ${currentJobId ? 'disabled' : ''}>${phaseDone > 0 ? 'Re-run' : 'Run Phase'}</button>
+        </div>
       </div>`;
-      document.body.appendChild(modal);
-    })
-    .catch(e => showToast(`Error: ${e.message}`));
+    }
+    html += `</div>`;
+  }
+
+  html += '</div>';
+  // Expert Library outside col-body, fills remaining space
+  html += renderExpertLibrary();
+  return html;
 }
 
-async function saveExpertPrompt(expertId, content, btn) {
-  btn.disabled = true; btn.textContent = 'Saving...';
-  try {
-    const res = await fetch(`/api/council/expert/${expertId}/prompt`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content })
+function renderContextPrompt() {
+  return `<details class="context-prompt-box">
+    <summary class="context-prompt-header">
+      <span class="context-prompt-label">Research Context</span>
+      <div class="context-prompt-toggle" onclick="event.stopPropagation()">
+        <button class="btn btn-xs ${researchContextMode === 'basic' ? 'btn-primary' : 'btn-ghost'}" onclick="setContextMode('basic')">Basic</button>
+        <button class="btn btn-xs ${researchContextMode === 'custom' ? 'btn-primary' : 'btn-ghost'}" onclick="setContextMode('custom')">Custom</button>
+      </div>
+    </summary>
+    <div class="context-prompt-content">
+    ${researchContextMode === 'custom'
+      ? `<textarea class="context-prompt-textarea" rows="6"
+          placeholder="Enter custom context for all experts..."
+          oninput="customContextText = this.value">${escapeHtml(customContextText)}</textarea>`
+      : `<div class="context-prompt-preview">${escapeHtml(basicContextText)}</div>`
+    }
+    </div>
+  </details>`;
+}
+
+function setContextMode(mode) {
+  researchContextMode = mode;
+  render();
+}
+
+function renderExpertLibrary() {
+  if (!expertRegistry?.length) return '';
+
+  const assignedIds = new Set(getAllExperts().map(e => e.id));
+
+  let html = `<div class="expert-pool">
+    <div class="expert-pool-header">
+      <span>Expert Library (${expertRegistry.length})</span>
+      <button class="btn btn-xs btn-ghost" onclick="openCreateExpertModal()">+ New</button>
+    </div>
+    <ul class="expert-bullet-list expert-pool-list">`;
+
+  for (const e of expertRegistry) {
+    const assigned = assignedIds.has(e.id);
+    const hasResult = !!expertResults[e.id];
+    const isGuardian = !!e.is_guardian;
+    const defaultSlot = isGuardian ? 'guardians' : 'experts';
+    html += `<li class="expert-bullet ${assigned ? 'assigned' : ''} ${isGuardian ? 'guardian-bullet' : ''}"
+      draggable="true"
+      ondragstart="onExpertDragStart(event, '${e.id}', '${escapeAttr(e.role)}', '${escapeAttr(e.prompt_file)}', '', 0, '${defaultSlot}')"
+      onclick="openExpertPromptModal('${e.id}')">
+      <div class="expert-bullet-header">
+        <span class="drag-handle">&#x2807;</span>
+        <strong>${escapeHtml(e.role)}</strong>
+        ${isGuardian ? '<span style="font-size:0.5rem;color:var(--warning);margin-left:2px">G</span>' : ''}
+        ${assigned ? '<span style="font-size:0.55rem;color:var(--accent)">&#x25CF;</span>' : ''}
+        ${hasResult ? '<span style="font-size:0.55rem;color:var(--success)">&#x2713;</span>' : ''}
+      </div>
+      ${e.description ? `<span class="expert-bullet-desc">${escapeHtml(e.description)}</span>` : ''}
+    </li>`;
+  }
+
+  html += `</ul></div>`;
+  return html;
+}
+
+// ── Drag & Drop ─────────────────────────────────────────────
+
+function onExpertDragStart(event, expertId, role, promptFile, fromPhase, fromStage, fromSlot) {
+  dragData = { expertId, role, prompt_file: promptFile, fromPhase, fromStage, fromSlot: fromSlot || 'experts' };
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', expertId);
+}
+
+function onPhaseDragOver(event) {
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  event.currentTarget.classList.add('phase-drop-target');
+}
+
+document.addEventListener('dragleave', (e) => {
+  const zone = e.target.closest?.('.expert-chip-list, .guardian-slot');
+  if (zone) zone.classList.remove('phase-drop-target');
+});
+
+async function onPhaseDrop(event, phaseId, stage, slot) {
+  event.preventDefault();
+  event.currentTarget.classList.remove('phase-drop-target');
+  if (!dragData) return;
+
+  const { expertId, role, prompt_file, fromPhase, fromStage, fromSlot } = dragData;
+  const targetSlot = slot || 'experts';
+
+  // Remove from old location
+  if (fromPhase) {
+    const oldSlot = fromSlot || 'experts';
+    await fetch(`/api/council/phase/${fromPhase}/${oldSlot}/${expertId}?stage=${fromStage}`, { method: 'DELETE' });
+  }
+
+  // Add to new location (unless dropping back to same spot)
+  if (fromPhase !== phaseId || fromSlot !== targetSlot) {
+    const res = await fetch(`/api/council/phase/${phaseId}/${targetSlot}?stage=${stage}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expert_id: expertId, role, prompt_file }),
     });
     const data = await res.json();
-    if (data.ok) { showToast('Prompt saved'); btn.textContent = 'Saved'; }
-    else showToast(`Error: ${data.error}`);
-  } catch (e) { showToast(`Error: ${e.message}`); btn.disabled = false; btn.textContent = 'Save Prompt'; }
+    if (data.error && data.error !== 'Already assigned') {
+      notify(data.error, 'error');
+    }
+  }
+
+  dragData = null;
+  await fetchCouncilData();
+  render();
 }
 
-function openCreateExpertModal() {
-  const modal = document.createElement('div');
-  modal.className = 'expert-modal-overlay';
-  modal.onclick = ev => { if (ev.target === modal) modal.remove(); };
-  modal.innerHTML = `<div class="expert-modal" style="max-width:600px">
-    <div class="modal-header">
-      <h3>Create New Expert</h3>
-      <button class="modal-close" onclick="this.closest('.expert-modal-overlay').remove()">×</button>
-    </div>
-    <div class="modal-body">
-      <div class="create-expert-form">
-        <label>Name / Title</label>
-        <input type="text" id="new-expert-name" placeholder="e.g. Sound Designer, Political Theorist, Marine Biologist" style="width:100%;padding:8px;background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.85rem">
-        <label>Description — who are they, what do they know?</label>
-        <textarea id="new-expert-desc" rows="4" placeholder="Describe their expertise, background, and unique perspective. What domains do they cover? What methodologies or traditions do they draw from?" style="width:100%;padding:8px;background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.85rem;resize:vertical"></textarea>
-        <label>Goals — what should they produce?</label>
-        <textarea id="new-expert-goals" rows="3" placeholder="What specific deliverable should this expert create? What questions should they address? What format should the output take?" style="width:100%;padding:8px;background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.85rem;resize:vertical"></textarea>
-      </div>
-      <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
-        <button class="btn btn-sm" onclick="this.closest('.expert-modal-overlay').remove()">Cancel</button>
-        <button class="btn btn-sm btn-primary" id="create-expert-btn" onclick="createExpert(this)">Create Expert</button>
-      </div>
+async function addFromDropdown(selectEl, phaseId, stage, slot) {
+  const expertId = selectEl.value;
+  if (!expertId) return;
+  const opt = selectEl.selectedOptions[0];
+  const role = opt?.dataset?.role || '';
+  const prompt_file = opt?.dataset?.pf || '';
+  const res = await fetch(`/api/council/phase/${phaseId}/${slot}?stage=${stage}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expert_id: expertId, role, prompt_file }),
+  });
+  const data = await res.json();
+  if (data.error && data.error !== 'Already assigned') {
+    notify(data.error, 'error');
+  }
+  await fetchCouncilData();
+  render();
+}
+
+async function removeExpertFromPhase(phaseId, expertId, stage, slot) {
+  const s = slot || 'experts';
+  await fetch(`/api/council/phase/${phaseId}/${s}/${expertId}?stage=${stage}`, { method: 'DELETE' });
+  await fetchCouncilData();
+  render();
+}
+
+// ── MIDDLE COLUMN: Outputs & Refinement ─────────────────────
+
+function getExpertsWithResults() {
+  return getAllExperts().filter(e => expertResults[e.id]);
+}
+
+function renderOutputsColumn() {
+  const expertsWithResults = getExpertsWithResults();
+  if (!selectedOutputExpert && expertsWithResults.length > 0) {
+    selectedOutputExpert = expertsWithResults[0].id;
+  }
+
+  let html = `<div class="col-header">
+    <h3>Outputs <span class="col-count">${expertsWithResults.length} results</span></h3>
+    <div style="display:flex;gap:0.25rem">
+      ${selectedOutputExpert && expertResults[selectedOutputExpert]
+        ? `<button class="btn btn-sm btn-success" onclick="curateOutput('${selectedOutputExpert}')">Send to Synthesis &rarr;</button>`
+        : ''}
     </div>
   </div>`;
-  document.body.appendChild(modal);
-  document.getElementById('new-expert-name').focus();
+
+  if (expertsWithResults.length === 0) {
+    html += `<div class="col-body"><div class="empty-state"><div class="empty-icon">&#x1F4CB;</div><p>Run experts in the Research column. Outputs appear here for review and refinement.</p></div></div>`;
+    return html;
+  }
+
+  html += `<div class="output-tabs">`;
+  for (const e of expertsWithResults) {
+    const isActive = selectedOutputExpert === e.id;
+    const result = expertResults[e.id];
+    const revised = result?.revision_count > 0;
+    html += `<button class="output-tab has-result ${isActive ? 'active' : ''}" onclick="selectExpertOutput('${e.id}')">
+      ${escapeHtml(e.role)}${revised ? ` (v${result.revision_count + 1})` : ''}
+    </button>`;
+  }
+  html += `</div>`;
+
+  if (selectedOutputExpert && expertResults[selectedOutputExpert]) {
+    const result = expertResults[selectedOutputExpert];
+    const hasGuardian = !!result._guardian;
+    const hasFeedback = !!result._feedbackResult;
+
+    html += `<div class="output-tabs" style="border-bottom:1px solid var(--border);background:var(--surface)">
+      <button class="output-tab ${activeOutputTab === 'summary' ? 'active' : ''}" onclick="setOutputTab('summary')">Summary</button>
+      <button class="output-tab ${activeOutputTab === 'full' ? 'active' : ''}" onclick="setOutputTab('full')">Full Output</button>
+      <button class="output-tab ${activeOutputTab === 'feedback' ? 'active' : ''} ${hasFeedback ? 'has-result' : ''}" onclick="setOutputTab('feedback')">Feedback Loop${hasFeedback ? ' &#x2713;' : ''}</button>
+      <button class="output-tab ${activeOutputTab === 'guardian' ? 'active' : ''} ${hasGuardian ? 'has-result' : ''}" onclick="setOutputTab('guardian')">Guardian${hasGuardian ? ' &#x2713;' : ''}</button>
+    </div>`;
+
+    html += `<div class="col-body">`;
+
+    const vault = revisionVault[selectedOutputExpert] || [];
+    if (vault.length > 0) html += renderRevisionVault(selectedOutputExpert, vault);
+
+    if (activeOutputTab === 'summary') html += renderSummaryTab(result);
+    else if (activeOutputTab === 'full') html += renderFullTab(result);
+    else if (activeOutputTab === 'feedback') html += renderFeedbackTab(selectedOutputExpert, result);
+    else if (activeOutputTab === 'guardian') html += renderGuardianTab(selectedOutputExpert, result);
+
+    html += `</div>`;
+  }
+
+  return html;
 }
 
-async function createExpert(btn) {
-  const name = document.getElementById('new-expert-name').value.trim();
-  const description = document.getElementById('new-expert-desc').value.trim();
-  const goals = document.getElementById('new-expert-goals').value.trim();
+function renderSummaryTab(result) {
+  let html = '';
+  if (result.summary) {
+    html += `<div class="output-summary">${renderMarkdown(result.summary)}</div>`;
+  } else {
+    html += `<div class="empty-state" style="padding:1.5rem"><p>Summary is being generated...</p></div>`;
+  }
+  if (result.revision_count > 0) {
+    html += `<div style="margin-top:0.5rem;font-size:0.7rem;color:var(--text-muted)">Revision ${result.revision_count} &mdash; revised at ${result.revised_at?.split('T')[0] || 'unknown'}</div>`;
+  }
+  return html;
+}
 
-  if (!name) { showToast('Name is required'); return; }
-  if (!description) { showToast('Description is required'); return; }
+function renderFullTab(result) {
+  return `<div class="output-full">${renderMarkdown(result.content)}</div>`;
+}
 
-  btn.disabled = true;
-  btn.textContent = 'Generating prompt...';
+function renderFeedbackTab(expertId, result) {
+  let html = '';
+  const fl = result._feedbackResult;
 
+  if (!fl) {
+    html += `<div style="padding:0.75rem">
+      <p style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.75rem">Run a multi-model feedback loop &mdash; 6 AI models debate and refine the output through blind peer review.</p>
+      <button class="btn btn-primary" onclick="runFeedbackLoop('${expertId}')">Run Feedback Loop</button>
+    </div>`;
+    return html;
+  }
+
+  if (fl.analysis) {
+    html += `<div style="padding:0.5rem">`;
+    if (fl.analysis.summary) {
+      html += `<div class="output-summary"><strong>Summary:</strong> ${escapeHtml(fl.analysis.summary)}</div>`;
+    }
+    const sections = [
+      { key: 'consensus_points', title: 'Consensus Points', color: 'var(--success)', prefix: 'fl_consensus' },
+      { key: 'strongest_ideas', title: 'Strongest Ideas', color: 'var(--accent)', prefix: 'fl_idea' },
+      { key: 'similarities', title: 'Similarities', color: 'var(--text)', prefix: 'fl_sim', format: s => `${s.theme}: ${s.detail}` },
+      { key: 'differences', title: 'Differences & Tensions', color: 'var(--warning)', prefix: 'fl_diff', format: d => `${d.theme}: ${d.detail}` },
+    ];
+    for (const sec of sections) {
+      const items = fl.analysis[sec.key];
+      if (items?.length) {
+        html += `<div class="feedback-section"><h5 class="feedback-section-title" style="color:${sec.color}">${sec.title}</h5>`;
+        items.forEach((item, i) => {
+          const itemId = `${sec.prefix}_${i}`;
+          const text = sec.format ? sec.format(item) : item;
+          const inVault = (revisionVault[expertId] || []).find(v => v.id === itemId);
+          html += renderFeedbackCard(expertId, itemId, text, `Feedback Loop &mdash; ${sec.title}`, inVault);
+        });
+        html += `</div>`;
+      }
+    }
+    html += `</div>`;
+  }
+
+  const lastRound = fl.rounds?.[fl.rounds.length - 1];
+  if (lastRound?.statements) {
+    html += `<details style="padding:0.5rem"><summary style="font-size:0.75rem;cursor:pointer;color:var(--text-muted)">Final Model Statements (${Object.keys(lastRound.statements).length})</summary>`;
+    for (const [mid, stmt] of Object.entries(lastRound.statements)) {
+      html += `<div class="fl-statement-card">
+        <div class="fl-statement-model">${escapeHtml(stmt.name)}</div>
+        <div class="fl-statement-text">${renderMarkdown(stmt.text)}</div>
+      </div>`;
+    }
+    html += `</details>`;
+  }
+
+  html += `<div style="padding:0.5rem"><button class="btn btn-sm" onclick="runFeedbackLoop('${expertId}')">Re-run Feedback Loop</button></div>`;
+  return html;
+}
+
+function renderGuardianTab(expertId, result) {
+  let html = '';
+  const guardian = result._guardian;
+
+  html += `<div style="padding:0.75rem;border-bottom:1px solid var(--border)">
+    <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem">
+      <span style="font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;font-weight:600">Check against:</span>
+      ${availableContexts.map(ctx => `
+        <label style="display:flex;align-items:center;gap:0.25rem;font-size:0.72rem;cursor:pointer">
+          <input type="checkbox" class="guardian-ctx-check" value="${escapeAttr(ctx.id)}"
+            ${['disordine','futurax'].includes(ctx.id) ? 'checked' : ''} style="accent-color:var(--accent)">
+          ${escapeHtml(ctx.name)}
+        </label>
+      `).join('')}
+    </div>
+    <details>
+      <summary style="font-size:0.7rem;color:var(--text-muted);cursor:pointer">Add custom context</summary>
+      <textarea id="guardian-custom-ctx" rows="3" placeholder="Paste or type custom context here..."
+        style="width:100%;margin-top:0.35rem;padding:0.4rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.75rem;font-family:inherit;resize:vertical"></textarea>
+    </details>
+    <button class="btn btn-sm btn-primary" onclick="runContextGuardian('${expertId}')" style="margin-top:0.5rem">
+      ${guardian ? 'Re-run' : 'Run'} Context Guardian
+    </button>
+  </div>`;
+
+  if (!guardian) {
+    html += `<div class="col-body" style="padding:0.75rem"><div class="empty-state"><p>Select contexts above and run the guardian to check alignment.</p></div></div>`;
+    return html;
+  }
+
+  if (guardian.sections) {
+    for (const section of guardian.sections) {
+      html += `<div style="padding:0.75rem;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">
+          <h5 style="font-size:0.8rem;color:var(--accent)">${escapeHtml(section.context_name)}</h5>
+          <span style="font-size:1.2rem;font-weight:700;${section.score >= 7 ? 'color:var(--success)' : section.score >= 4 ? 'color:var(--warning)' : 'color:var(--danger)'}">${section.score}/10</span>
+        </div>`;
+
+      if (section.error) {
+        html += `<div style="color:var(--danger);font-size:0.75rem">Error: ${escapeHtml(section.error)}</div>`;
+      } else {
+        const categories = [
+          { key: 'strengths', title: 'Strengths', color: 'var(--success)' },
+          { key: 'concerns', title: 'Concerns', color: 'var(--danger)' },
+          { key: 'suggestions', title: 'Suggestions', color: 'var(--info)' },
+          { key: 'missing_elements', title: 'Missing Elements', color: 'var(--warning)' },
+        ];
+        for (const cat of categories) {
+          if (section[cat.key]?.length) {
+            html += `<div class="feedback-section"><h5 class="feedback-section-title" style="color:${cat.color}">${cat.title}</h5>`;
+            section[cat.key].forEach(item => {
+              const inVault = (revisionVault[expertId] || []).find(v => v.id === item.id);
+              html += renderFeedbackCard(expertId, item.id, item.text, `Guardian &mdash; ${section.context_name} &mdash; ${cat.title.slice(0, -1)}`, inVault);
+            });
+            html += `</div>`;
+          }
+        }
+      }
+      html += `</div>`;
+    }
+  }
+
+  return html;
+}
+
+function renderFeedbackCard(expertId, itemId, text, source, inVault) {
+  return `<div class="feedback-card ${inVault ? 'in-vault' : ''}" data-item-id="${itemId}">
+    <div class="feedback-card-text">${escapeHtml(text)}</div>
+    <button class="btn btn-xs ${inVault ? 'btn-danger-outline' : 'btn-ghost'}"
+      onclick="toggleVaultItem('${expertId}', '${itemId}', ${JSON.stringify(escapeAttr(text))}, ${JSON.stringify(escapeAttr(source))})">
+      ${inVault ? '&minus; Remove' : '+ Vault'}
+    </button>
+  </div>`;
+}
+
+// ── Revision Vault ──────────────────────────────────────────
+
+function renderRevisionVault(expertId, vault) {
+  return `<div class="revision-vault">
+    <div class="revision-vault-header">
+      <h5>Revision Vault (${vault.length})</h5>
+      <div style="display:flex;gap:0.25rem">
+        <button class="btn btn-xs btn-primary" onclick="sendForRevision('${expertId}')">Send for Revision</button>
+        <button class="btn btn-xs btn-ghost" onclick="clearVault('${expertId}')">Clear</button>
+      </div>
+    </div>
+    <div class="revision-vault-items">
+      ${vault.map(item => `
+        <div class="vault-item">
+          <div class="vault-item-source">${escapeHtml(item.source)}</div>
+          <div class="vault-item-text">${escapeHtml(item.text)}</div>
+          <button class="btn-icon" onclick="removeVaultItem('${expertId}', '${item.id}')" title="Remove">&times;</button>
+        </div>
+      `).join('')}
+    </div>
+  </div>`;
+}
+
+function toggleVaultItem(expertId, itemId, text, source) {
+  if (!revisionVault[expertId]) revisionVault[expertId] = [];
+  const idx = revisionVault[expertId].findIndex(v => v.id === itemId);
+  if (idx >= 0) revisionVault[expertId].splice(idx, 1);
+  else revisionVault[expertId].push({ id: itemId, text, source });
+  render();
+}
+
+function removeVaultItem(expertId, itemId) {
+  if (!revisionVault[expertId]) return;
+  revisionVault[expertId] = revisionVault[expertId].filter(v => v.id !== itemId);
+  render();
+}
+
+function clearVault(expertId) { revisionVault[expertId] = []; render(); }
+
+async function sendForRevision(expertId) {
+  const vault = revisionVault[expertId] || [];
+  if (vault.length === 0) { notify('Vault is empty', 'error'); return; }
+  notify(`Sending ${vault.length} feedback items for revision...`, 'phase');
   try {
-    const res = await fetch('/api/council/experts/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, description, goals: goals || description })
+    const res = await fetch(`/api/council/expert/${expertId}/revise`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feedback_items: vault }),
     });
     const data = await res.json();
     if (data.ok) {
-      showToast(`Created: ${data.expert.role}`);
-      btn.closest('.expert-modal-overlay').remove();
-      await fetchExpertRegistry();
-      await fetchPipeline();
-    } else {
-      showToast(`Error: ${data.error}`);
-      btn.disabled = false;
-      btn.textContent = 'Create Expert';
+      expertResults[expertId].content = data.content;
+      expertResults[expertId].revision_count = data.revision_count;
+      expertResults[expertId].revised_at = new Date().toISOString();
+      delete expertResults[expertId].summary;
+      revisionVault[expertId] = [];
+      notify(`Output revised (v${data.revision_count + 1})`, 'done');
+      try { const r = await fetch(`/api/council/results/${expertId}`); expertResults[expertId] = await r.json(); } catch(e) {}
+      render();
+    } else notify(`Revision failed: ${data.error}`, 'error');
+  } catch(e) { notify('Revision failed', 'error'); }
+}
+
+// ── RIGHT COLUMN: Synthesis ─────────────────────────────────
+
+function renderSynthesisColumn() {
+  let html = `
+    <div class="col-header">
+      <h3>Synthesis <span class="col-count">${curatedOutputs.length} curated</span></h3>
+      <div style="display:flex;gap:0.25rem">
+        ${curatedOutputs.length > 0 ? `<button class="btn btn-sm btn-primary" onclick="runSynthesis()">Synthesize</button>` : ''}
+        ${synthesisFull ? `<button class="btn btn-sm" onclick="extractFilmBrief()">Film Brief</button>` : ''}
+      </div>
+    </div>
+    <div class="col-body">
+  `;
+
+  if (curatedOutputs.length === 0 && !synthesisFull && !filmBrief) {
+    html += `<div class="empty-state"><div class="empty-icon">&#x1F3AC;</div><p>Refine expert outputs, then send them here. Synthesize into a unified vision when ready.</p></div>`;
+    html += '</div>';
+    return html;
+  }
+
+  if (filmBrief) {
+    html += `<div style="margin-bottom:0.75rem">
+      <button class="btn btn-sm btn-success" onclick="openFilmBriefModal()" style="width:100%">
+        View Film Brief ${filmBrief.characters ? `(${filmBrief.characters.length} chars, ${filmBrief.environments?.length || 0} envs, ${filmBrief.scenes?.length || 0} scenes)` : ''}
+      </button>
+    </div>`;
+  }
+
+  if (synthesisFull) {
+    html += `<div class="synthesis-output">
+      <h4>Synthesis</h4>
+      <div class="synthesis-content" style="max-height:300px;overflow-y:auto">${renderMarkdown(synthesisFull)}</div>
+    </div>`;
+  }
+
+  if (curatedOutputs.length > 0) {
+    html += `<div style="margin-top:0.75rem"><h4 style="font-size:0.78rem;color:var(--text-muted);margin-bottom:0.5rem">Curated Outputs</h4>`;
+    for (const item of curatedOutputs) {
+      html += `<div class="curated-item">
+        <div class="curated-item-header">
+          <span class="curated-item-role">${escapeHtml(item.role)}</span>
+          <span class="curated-item-source">${escapeHtml(item.phase_id || '')}</span>
+        </div>
+        <div class="curated-item-preview">${escapeHtml(item.content?.substring(0, 200) || '')}...</div>
+        <div class="curated-item-actions">
+          <button class="btn btn-xs btn-ghost" onclick="selectExpertOutput('${item.expert_id}')">View</button>
+          <button class="btn btn-xs btn-danger-outline" onclick="removeCuratedItem('${item.expert_id}')">Remove</button>
+        </div>
+      </div>`;
     }
-  } catch (e) {
-    showToast(`Error: ${e.message}`);
-    btn.disabled = false;
-    btn.textContent = 'Create Expert';
-  }
-}
-
-async function addExpertToPhase(phaseId, expertId, role, promptFile) {
-  const found = findPhaseAcrossStages(phaseId);
-  const phase = found ? found.phase : null;
-  if (!phase) return;
-  if (phase.experts.some(e => e.id === expertId)) {
-    showToast('Already in this phase');
-    return;
-  }
-  const newExperts = [...phase.experts, { id: expertId, role, prompt_file: promptFile }];
-  await savePhaseExperts(phaseId, newExperts);
-  await fetchPipeline();
-  showToast(`Added to ${phase.name}`);
-}
-
-function startDrag(event, id, role, promptFile) {
-  draggedExpert = { id, role, promptFile };
-  event.dataTransfer.effectAllowed = 'copy';
-  event.target.classList.add('dragging');
-}
-
-async function dropToPhase(event, phaseId, el) {
-  event.preventDefault();
-  el.classList.remove('drag-over');
-  if (!draggedExpert) return;
-
-  const found = findPhaseAcrossStages(phaseId);
-  const phase = found ? found.phase : null;
-  if (!phase) return;
-
-  if (phase.experts.some(e => e.id === draggedExpert.id)) {
-    showToast('Expert already in this phase');
-    draggedExpert = null;
-    return;
+    html += `</div>`;
   }
 
-  let promptFile = draggedExpert.promptFile;
-  if (!promptFile) {
-    const reg = expertRegistry.find(e => e.id === draggedExpert.id);
-    if (reg) promptFile = reg.prompt_file;
-  }
-
-  const newExperts = [...phase.experts, { id: draggedExpert.id, role: draggedExpert.role, prompt_file: promptFile }];
-  await savePhaseExperts(phaseId, newExperts);
-  draggedExpert = null;
-  showToast(`Added to ${phase.name}`);
-  await fetchPipeline();
+  html += `</div>`;
+  return html;
 }
 
-async function removeExpertFromPhase(phaseId, expertId) {
-  const found = findPhaseAcrossStages(phaseId);
-  const phase = found ? found.phase : null;
-  if (!phase) return;
-  const newExperts = phase.experts.filter(e => e.id !== expertId);
-  await savePhaseExperts(phaseId, newExperts);
-  await fetchPipeline();
+// ── Actions ─────────────────────────────────────────────────
+
+function togglePhase(phaseId) {
+  selectedPhase = selectedPhase === phaseId ? null : phaseId;
+  render();
 }
 
-async function savePhaseExperts(phaseId, experts) {
-  try {
-    const payload = experts.map(e => {
-      const reg = expertRegistry.find(r => r.id === e.id);
-      return { id: e.id, role: e.role, prompt_file: e.prompt_file || (reg ? reg.prompt_file : '') };
-    });
-    const found = findPhaseAcrossStages(phaseId);
-    const stg = found ? found.stage : (selectedStage || 1);
-    const res = await fetch(`/api/council/phase/${phaseId}/experts?stage=${stg}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ experts: payload })
-    });
-    const data = await res.json();
-    if (!data.ok) showToast(`Error: ${data.error}`);
-  } catch (e) { showToast(`Error: ${e.message}`); }
+function selectExpertOutput(expertId) {
+  selectedOutputExpert = expertId;
+  activeOutputTab = 'summary';
+  render();
 }
 
-async function saveContext(level, content, btn) {
-  btn.disabled = true; btn.textContent = 'Saving...';
-  try {
-    const res = await fetch(`/api/council/context/${level}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content })
-    });
-    const data = await res.json();
-    if (data.ok) { showToast('Context saved'); btn.closest('.expert-modal-overlay').remove(); }
-    else showToast(`Error: ${data.error}`);
-  } catch (e) { showToast(`Error: ${e.message}`); }
+function setOutputTab(tab) { activeOutputTab = tab; render(); }
+
+// ── Run Experts ─────────────────────────────────────────────
+
+async function runPhase(phaseId, stage) {
+  const ctxText = getActiveContextText();
+  const res = await fetch('/api/council/run', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phase_id: phaseId, stage, run_mode: 'phase', context_text: ctxText }),
+  });
+  const data = await res.json();
+  if (data.ok) { currentJobId = data.job_id; connectSSE(data.job_id); render(); }
 }
 
-// ── Council execution ───────────────────────────────────────
-
-async function runCouncilPhase(phaseId) {
-  const btn = document.getElementById(`btn-phase-${phaseId}`);
-  if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
-  try {
-    const stg = selectedStage || 1;
-    const res = await fetch('/api/council/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phase_id: phaseId, stage: stg }) });
-    const data = await res.json();
-    if (!data.ok) { showToast(`Error: ${data.error}`); return; }
-    currentJobId = data.job_id;
-    consoleStatus = { text: 'Starting...', cls: 'running' };
-    renderConsole();
-    streamJobProgress(data.job_id);
-  } catch (e) {
-    showToast(`Error: ${e.message}`);
-    if (btn) { btn.disabled = false; btn.textContent = 'Run Phase'; }
-  }
+async function runAllPhases() {
+  const ctxText = getActiveContextText();
+  const phases = getAllPhases();
+  if (!phases.length) return;
+  const first = phases[0];
+  const res = await fetch('/api/council/run', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phase_id: first.id, stage: first.stage, run_mode: 'phase', context_text: ctxText }),
+  });
+  const data = await res.json();
+  if (data.ok) { currentJobId = data.job_id; connectSSE(data.job_id); render(); }
 }
 
 async function stopGeneration() {
   if (!currentJobId) return;
-  try {
-    await fetch(`/api/jobs/${currentJobId}/cancel`, { method: 'POST' });
-    showToast('Stopping generation...');
-  } catch (e) {
-    showToast(`Error: ${e.message}`);
-  }
+  await fetch(`/api/jobs/${currentJobId}/cancel`, { method: 'POST' });
+  currentJobId = null;
+  runningExperts.clear();
+  if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
+  render();
 }
 
-function streamJobProgress(jobId) {
+function connectSSE(jobId) {
   if (activeEvtSource) activeEvtSource.close();
-  const evtSource = new EventSource(`/api/jobs/${jobId}/stream`);
-  activeEvtSource = evtSource;
+  activeEvtSource = new EventSource(`/api/jobs/${jobId}/stream`);
 
-  evtSource.onmessage = (event) => {
+  activeEvtSource.onmessage = async (event) => {
     const data = JSON.parse(event.data);
     if (data.type === 'log') {
-      consolePush({ time: data.time, message: data.message, level: data.level || 'info', expert: data.expert });
-
-      if (data.running_experts) runningExperts = new Set(data.running_experts);
-
+      if (data.level === 'start' && data.expert) { runningExperts.add(data.expert); render(); }
       if (data.level === 'done' && data.expert) {
-        fetchExpertResults().then(() => render());
+        runningExperts.delete(data.expert);
+        try { const r = await fetch(`/api/council/results/${data.expert}`); expertResults[data.expert] = await r.json(); } catch(e) {}
+        render();
       }
-      if (data.level === 'start' && activeTab === 'progress') render();
-
-      if (data.experts_total > 0) {
-        consoleStatus = { text: `${data.phase_name||''} ${data.experts_done}/${data.experts_total}`, cls: 'running' };
-        const s = document.getElementById('console-status');
-        if (s) { s.textContent = consoleStatus.text; s.className = 'console-status running'; }
+      if (['phase','done','error'].includes(data.level)) {
+        notify(data.message, data.level === 'error' ? 'error' : data.level === 'phase' ? 'phase' : 'done');
       }
     }
     if (data.type === 'done') {
-      evtSource.close(); activeEvtSource = null; currentJobId = null; runningExperts.clear();
-      const statusMap = { complete: { text: 'Complete', cls: 'done' }, cancelled: { text: 'Stopped', cls: 'error' } };
-      consoleStatus = statusMap[data.status] || { text: 'Error', cls: 'error' };
-      const s = document.getElementById('console-status');
-      if (s) { s.textContent = consoleStatus.text; s.className = `console-status ${consoleStatus.cls}`; }
-      if (data.error) consolePush({ time: '', message: `Error: ${data.error}`, level: 'error' });
-      fetchPipeline();
-      const toastMsg = { complete: 'Phase complete', cancelled: 'Generation stopped' };
-      showToast(toastMsg[data.status] || `Error: ${data.error}`);
+      currentJobId = null; runningExperts.clear();
+      if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
+      await fetchExpertResults();
+      render();
     }
   };
-  evtSource.onerror = () => {
-    evtSource.close(); activeEvtSource = null;
-    consoleStatus = { text: 'Disconnected', cls: 'error' };
-    const s = document.getElementById('console-status');
-    if (s) { s.textContent = 'Disconnected'; s.className = 'console-status error'; }
+
+  activeEvtSource.onerror = () => {
+    if (activeEvtSource) { activeEvtSource.close(); activeEvtSource = null; }
+    // Don't clear job state — the server task is still running.
+    // The 5s poll will reconnect if the job is still active.
+    runningExperts.clear();
+    currentJobId = null;
+    render();
   };
 }
 
-async function approvePhase(phaseId) {
-  if (!pipelineData) return;
-  const stage = pipelineData.stages.find(s => s.stage === 1);
-  if (!stage) return;
-  for (const a of stage.artifacts.filter(a => a.content?.phase === phaseId && a.approval === 'pending'))
-    await fetch(`/api/artifacts/1/${a._filename}/approve`, { method: 'POST' });
-  showToast(`${phaseId} approved`); await fetchPipeline();
-}
+// ── Feedback Loop ───────────────────────────────────────────
 
-// ── Worldbuilding / Production ──────────────────────────────
+async function runFeedbackLoop(expertId) {
+  notify(`Starting feedback loop for ${expertResults[expertId]?.role || expertId}...`, 'phase');
+  const res = await fetch(`/api/council/expert/${expertId}/feedback-loop`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ max_rounds: 3 }),
+  });
+  const data = await res.json();
+  if (!data.ok) { notify('Failed to start feedback loop', 'error'); return; }
 
-// ── Worldbuilding panels ───────────────────────────────────
-
-function renderWBSynthesisPanel(stage) {
-  const synth = synthesisData[2];
-  const expertCount = Object.entries(expertResults).filter(([id]) => {
-    const phases = getCouncilPhases(2);
-    return phases.some(p => p.experts.some(e => e.id === id));
-  }).length;
-
-  let html = '<div class="wb-panel">';
-  html += '<div class="wb-panel-header"><h4>Worldbuilding Synthesis</h4><p>Consolidate council outputs into production-ready briefs for characters, environments, and style.</p></div>';
-
-  if (synth) {
-    html += `
-      <div class="synthesis-card">
-        <div class="synthesis-header">
-          <h4>Production Briefs</h4>
-          <span class="synthesis-meta">${synth.expert_count} experts · ${new Date(synth.timestamp).toLocaleString()}</span>
-          <button class="btn btn-sm" onclick="runSynthesis(2)">Re-synthesize</button>
-        </div>
-        <div class="synthesis-content">${renderMarkdown(synth.content)}</div>
-      </div>`;
-  } else if (expertCount > 0) {
-    html += `
-      <div class="synthesis-card synthesis-empty">
-        <p>${expertCount} expert outputs ready for synthesis</p>
-        <p class="wb-hint">This will generate character briefs, environment specs, a style guide, and bridge points — all production-ready.</p>
-        <button class="btn btn-primary" onclick="runSynthesis(2)" id="btn-synth">Generate Production Briefs</button>
-      </div>`;
-  } else {
-    html += '<div class="empty-state"><div class="empty-icon">📝</div><p>Run the council first to generate expert outputs, then synthesize them into production briefs.</p></div>';
-  }
-
-  html += '</div>';
-  return html;
-}
-
-function renderWBCharactersPanel(stage) {
-  const charArtifacts = stage.artifacts.filter(a => a.type === 'character_profile');
-  const chars = wbBriefs?.characters || [];
-  const charPhase = getCouncilPhases(2).find(p => p.id === 'characters');
-
-  let html = '<div class="wb-panel">';
-  html += '<div class="wb-panel-header"><h4>Characters</h4><p>Run character experts, then generate visual reference sheets.</p></div>';
-
-  // Embedded characters phase
-  if (charPhase) {
-    html += renderPhaseBlock(charPhase, true);
-  }
-
-  // Pre-populated generation cards from briefs
-  if (chars.length > 0) {
-    html += '<div class="wb-gen-cards">';
-    chars.forEach((ch, i) => {
-      const existing = charArtifacts.find(a => a.content?.name === ch.name);
-      const hasImages = existing && (existing.content?.views?.length || existing.content?.images?.length);
-      const images = existing ? (existing.content?.views || existing.content?.images || []) : [];
-      html += `<div class="wb-gen-card ${hasImages ? 'has-result' : ''}">
-        <div class="wb-gen-card-header">
-          <span class="wb-gen-card-name">${escapeHtml(ch.name)}</span>
-          <span class="wb-gen-card-role">${escapeHtml(ch.role || '')}</span>
-        </div>
-        <p class="wb-gen-card-desc">${escapeHtml(ch.description || '')}</p>
-        <div class="form-group"><label>Name</label><input id="ch-name-${i}" type="text" value="${escapeAttr(ch.name)}"></div>
-        <div class="form-group"><label>Visual Prompt</label><textarea id="ch-desc-${i}" rows="3">${escapeHtml(ch.visual_prompt || ch.description || '')}</textarea></div>
-        <div class="form-group"><label>Style</label><input id="ch-style-${i}" type="text" value="${escapeAttr(ch.style_prompt || 'grounded sci-fi, organic materials, warm palette')}"></div>
-        <button class="btn btn-primary btn-sm" onclick="generateCharacterFromCard(${i})" id="btn-ch-${i}">${hasImages ? 'Re-generate' : 'Generate'}</button>
-        ${hasImages ? `<div class="wb-gen-card-images">${renderImageGrid(images)}</div>
-          <div class="artifact-actions" style="padding:0.5rem;display:flex;gap:0.5rem;justify-content:center;">
-            <button class="btn btn-sm btn-approve" onclick="updateArtifact(2,'${existing._filename}','approve')">✓ Approve</button>
-            <button class="btn btn-sm btn-reject" onclick="updateArtifact(2,'${existing._filename}','reject')">✕ Reject</button>
-          </div>` : ''}
-      </div>`;
-    });
-    html += '</div>';
-  } else if (synthesisData[2]) {
-    html += `<div class="synthesis-card synthesis-empty">
-      <p>Synthesis exists but no structured briefs extracted yet.</p>
-      <button class="btn btn-primary" onclick="extractBriefs()" id="btn-extract-briefs">Extract Character & Environment Briefs</button>
-    </div>`;
-  } else {
-    html += '<div class="empty-state"><div class="empty-icon">👤</div><p>Run the council and synthesis first to generate character briefs.</p></div>';
-  }
-
-  // Manual add section
-  html += `<details class="wb-manual-section"><summary>Add character manually</summary>
-    <div class="wb-generate-section" style="margin-top:0.5rem">
-      <div class="form-group"><label>Name</label><input id="ch-name" type="text" placeholder="e.g. Kael"></div>
-      <div class="form-group"><label>Description</label><textarea id="ch-desc" rows="3" placeholder="Young scientist with warm brown skin..."></textarea></div>
-      <div class="form-group"><label>Style</label><input id="ch-style" type="text" value="grounded sci-fi, organic materials, warm palette"></div>
-      <button class="btn btn-primary" onclick="generateCharacter()" id="btn-ch">Generate Character Sheet</button>
-    </div>
-  </details>`;
-
-  html += '</div>';
-  return html;
-}
-
-function renderWBEnvironmentsPanel(stage) {
-  const envArtifacts = stage.artifacts.filter(a => a.type === 'environment_spec');
-  const envs = wbBriefs?.environments || [];
-  const envPhase = getCouncilPhases(2).find(p => p.id === 'environments');
-
-  let html = '<div class="wb-panel">';
-  html += '<div class="wb-panel-header"><h4>Environments</h4><p>Run environment experts, then generate visual references.</p></div>';
-
-  // Embedded environments phase
-  if (envPhase) {
-    html += renderPhaseBlock(envPhase, true);
-  }
-
-  // Pre-populated generation cards from briefs
-  if (envs.length > 0) {
-    html += '<div class="wb-gen-cards">';
-    envs.forEach((env, i) => {
-      const existing = envArtifacts.find(a => a.content?.name === env.name);
-      const hasImages = existing && existing.content?.images?.length;
-      const images = existing ? (existing.content?.images || []) : [];
-      html += `<div class="wb-gen-card ${hasImages ? 'has-result' : ''}">
-        <div class="wb-gen-card-header">
-          <span class="wb-gen-card-name">${escapeHtml(env.name)}</span>
-          <span class="wb-gen-card-role">${escapeHtml(env.function || '')}</span>
-        </div>
-        <p class="wb-gen-card-desc">${escapeHtml(env.description || '')}</p>
-        <div class="form-group"><label>Name</label><input id="env-name-${i}" type="text" value="${escapeAttr(env.name)}"></div>
-        <div class="form-group"><label>Visual Prompt</label><textarea id="env-desc-${i}" rows="3">${escapeHtml(env.visual_prompt || env.description || '')}</textarea></div>
-        <div class="form-group"><label>Style</label><input id="env-style-${i}" type="text" value="${escapeAttr(env.style_prompt || 'grounded sci-fi, organic architecture, golden hour')}"></div>
-        <button class="btn btn-primary btn-sm" onclick="generateEnvironmentFromCard(${i})" id="btn-env-${i}">${hasImages ? 'Re-generate' : 'Generate'}</button>
-        ${hasImages ? `<div class="wb-gen-card-images">${renderImageGrid(images)}</div>
-          <div class="artifact-actions" style="padding:0.5rem;display:flex;gap:0.5rem;justify-content:center;">
-            <button class="btn btn-sm btn-approve" onclick="updateArtifact(2,'${existing._filename}','approve')">✓ Approve</button>
-            <button class="btn btn-sm btn-reject" onclick="updateArtifact(2,'${existing._filename}','reject')">✕ Reject</button>
-          </div>` : ''}
-      </div>`;
-    });
-    html += '</div>';
-  } else if (synthesisData[2]) {
-    html += `<div class="synthesis-card synthesis-empty">
-      <p>Synthesis exists but no structured briefs extracted yet.</p>
-      <button class="btn btn-primary" onclick="extractBriefs()" id="btn-extract-briefs">Extract Character & Environment Briefs</button>
-    </div>`;
-  } else {
-    html += '<div class="empty-state"><div class="empty-icon">🏛</div><p>Run the council and synthesis first to generate environment briefs.</p></div>';
-  }
-
-  // Manual add section
-  html += `<details class="wb-manual-section"><summary>Add environment manually</summary>
-    <div class="wb-generate-section" style="margin-top:0.5rem">
-      <div class="form-group"><label>Name</label><input id="env-name" type="text" placeholder="e.g. The Commons"></div>
-      <div class="form-group"><label>Description</label><textarea id="env-desc" rows="3" placeholder="A vast open atrium..."></textarea></div>
-      <div class="form-group"><label>Style</label><input id="env-style" type="text" value="grounded sci-fi, organic architecture, golden hour"></div>
-      <button class="btn btn-primary" onclick="generateEnvironment()" id="btn-env">Generate Environment</button>
-    </div>
-  </details>`;
-
-  html += '</div>';
-  return html;
-}
-
-function renderWBStyleGuidePanel(stage) {
-  const synth = synthesisData[2];
-  const style = wbBriefs?.style;
-  const styleArtifacts = stage.artifacts.filter(a => a.type === 'concept' || a.type === 'style_guide');
-
-  let html = '<div class="wb-panel">';
-  html += '<div class="wb-panel-header"><h4>Style Guide</h4><p>The visual DNA of this world — color palette, materials, lighting, technology aesthetic.</p></div>';
-
-  // Structured style from briefs
-  if (style) {
-    // Color palette
-    if (style.palette && style.palette.length > 0) {
-      html += `<div class="wb-briefs-section">
-        <div class="wb-briefs-header"><h5>Color Palette</h5></div>
-        <div class="wb-palette">${style.palette.map(c =>
-          `<div class="wb-palette-swatch">
-            <div class="wb-swatch-color" style="background:${c.hex}"></div>
-            <span class="wb-swatch-name">${escapeHtml(c.name)}</span>
-            <span class="wb-swatch-hex">${c.hex}</span>
-            <span class="wb-swatch-usage">${escapeHtml(c.usage || '')}</span>
-          </div>`
-        ).join('')}</div>
-      </div>`;
+  const evtSource = new EventSource(`/api/feedback-loops/${data.loop_id}/stream`);
+  evtSource.onmessage = async (event) => {
+    const evt = JSON.parse(event.data);
+    if (evt.type === 'log' && ['phase','done','error'].includes(evt.level)) {
+      notify(evt.message, evt.level === 'error' ? 'error' : 'info');
     }
-
-    // Aesthetic, lighting, materials
-    const sections = [
-      { key: 'aesthetic', label: 'Aesthetic Direction' },
-      { key: 'lighting', label: 'Lighting Philosophy' },
-      { key: 'materials', label: 'Materials & Textures' },
-    ];
-    sections.forEach(s => {
-      if (style[s.key]) {
-        html += `<div class="wb-briefs-section">
-          <div class="wb-briefs-header"><h5>${s.label}</h5></div>
-          <div class="wb-briefs-content"><p>${escapeHtml(style[s.key])}</p></div>
-        </div>`;
+    if (evt.type === 'done') {
+      evtSource.close();
+      const flRes = await fetch(`/api/council/expert/${expertId}/feedback-loop`);
+      const flData = await flRes.json();
+      if (flData.result) {
+        expertResults[expertId]._feedbackResult = flData.result;
+        notify('Feedback loop complete', 'done');
+        activeOutputTab = 'feedback';
+        render();
       }
-    });
-  }
-
-  // Fallback to synthesis markdown
-  if (!style && synth && synth.content) {
-    const styleMatch = synth.content.match(/## Visual Style Guide\n([\s\S]*?)(?=\n## |$)/);
-    if (styleMatch) {
-      html += `<div class="wb-briefs-section">
-        <div class="wb-briefs-header"><h5>From Synthesis</h5></div>
-        <div class="wb-briefs-content">${renderMarkdown(styleMatch[1].trim())}</div>
-      </div>`;
     }
+  };
+  evtSource.onerror = () => evtSource.close();
+}
+
+// ── Context Guardian ────────────────────────────────────────
+
+async function runContextGuardian(expertId) {
+  const checkboxes = document.querySelectorAll('.guardian-ctx-check:checked');
+  const contexts = Array.from(checkboxes).map(cb => cb.value);
+  const customText = document.getElementById('guardian-custom-ctx')?.value || '';
+  if (contexts.length === 0 && !customText.trim()) {
+    notify('Select at least one context or provide custom text', 'error');
+    return;
   }
-
-  // The Bridge section
-  if (synth && synth.content) {
-    const bridgeMatch = synth.content.match(/## The Bridge\n([\s\S]*?)(?=\n## |$)/);
-    if (bridgeMatch) {
-      html += `<div class="wb-briefs-section">
-        <div class="wb-briefs-header"><h5>The Bridge — Today → This World</h5></div>
-        <div class="wb-briefs-content">${renderMarkdown(bridgeMatch[1].trim())}</div>
-      </div>`;
-    }
-  }
-
-  // Freeform generation for style exploration
-  html += `<div class="wb-generate-section">
-    <h5>Generate Style Reference</h5>
-    <div class="form-group"><label>Prompt</label><textarea id="ff-prompt" rows="3" placeholder="Color palette reference: warm organic architecture with golden hour light..."></textarea></div>
-    <div class="form-row">
-      <div class="form-group half"><label>Width</label><input id="ff-w" type="number" value="1024"></div>
-      <div class="form-group half"><label>Height</label><input id="ff-h" type="number" value="1024"></div>
-      <div class="form-group half"><label>Results</label><input id="ff-n" type="number" value="2" min="1" max="4"></div>
-    </div>
-    <div class="form-group"><label>Label</label><input id="ff-label" type="text" placeholder="Style reference — warm palette"></div>
-    <button class="btn btn-primary" onclick="generateFreeform()" id="btn-ff">Generate</button>
-  </div>`;
-
-  // Existing style artifacts
-  if (styleArtifacts.length > 0) {
-    html += '<div class="wb-artifacts-section"><h5>Style References</h5><div class="wb-artifact-grid">';
-    styleArtifacts.forEach(a => {
-      const images = a.content?.images || [];
-      const label = a.content?.label || 'Style Reference';
-      html += `<div class="wb-artifact-card">
-        <div class="wb-artifact-card-header">
-          <span class="wb-artifact-name">${escapeHtml(label)}</span>
-          <div class="artifact-actions">
-            <button class="btn btn-sm btn-approve" onclick="updateArtifact(2,'${a._filename}','approve')">✓</button>
-            <button class="btn btn-sm" onclick="deleteArtifact(2,'${a._filename}')" style="color:var(--text-muted)">🗑</button>
-          </div>
-        </div>
-        ${images.length > 0 ? renderImageGrid(images) : ''}
-        <span class="status-badge status-${a.approval}">${a.approval}</span>
-      </div>`;
+  notify(`Running Context Guardian (${contexts.length} contexts)...`, 'phase');
+  try {
+    const res = await fetch(`/api/council/expert/${expertId}/context-guardian`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contexts, custom_text: customText }),
     });
-    html += '</div></div>';
-  }
-
-  html += '</div>';
-  return html;
-}
-
-function renderWorldbuildingGenerate() {
-  return `<div class="generate-panel">
-    <div class="generate-tabs">
-      <button class="gen-tab active" onclick="showGenSub(this,'gen-freeform')">Freeform</button>
-      <button class="gen-tab" onclick="showGenSub(this,'gen-character')">Character</button>
-      <button class="gen-tab" onclick="showGenSub(this,'gen-environment')">Environment</button>
-    </div>
-    <div id="gen-freeform" class="gen-sub">
-      <div class="form-group"><label>Prompt</label><textarea id="ff-prompt" rows="3" placeholder="Describe what you want..."></textarea></div>
-      <div class="form-row">
-        <div class="form-group half"><label>Width</label><input id="ff-w" type="number" value="1024"></div>
-        <div class="form-group half"><label>Height</label><input id="ff-h" type="number" value="1024"></div>
-        <div class="form-group half"><label>Results</label><input id="ff-n" type="number" value="1" min="1" max="4"></div>
-      </div>
-      <div class="form-group"><label>Label</label><input id="ff-label" type="text" placeholder="Name this generation"></div>
-      <button class="btn btn-primary" onclick="generateFreeform()" id="btn-ff">Generate</button>
-    </div>
-    <div id="gen-character" class="gen-sub" style="display:none;">
-      <div class="form-group"><label>Name</label><input id="ch-name" type="text" placeholder="e.g. Kael"></div>
-      <div class="form-group"><label>Description</label><textarea id="ch-desc" rows="3" placeholder="Young scientist..."></textarea></div>
-      <div class="form-group"><label>Style</label><input id="ch-style" type="text" placeholder="grounded sci-fi"></div>
-      <button class="btn btn-primary" onclick="generateCharacter()" id="btn-ch">Generate Character Sheet</button>
-    </div>
-    <div id="gen-environment" class="gen-sub" style="display:none;">
-      <div class="form-group"><label>Name</label><input id="env-name" type="text" placeholder="e.g. Metanoia Hub"></div>
-      <div class="form-group"><label>Description</label><textarea id="env-desc" rows="3" placeholder="A vast atrium..."></textarea></div>
-      <div class="form-group"><label>Style</label><input id="env-style" type="text" placeholder="golden hour"></div>
-      <button class="btn btn-primary" onclick="generateEnvironment()" id="btn-env">Generate Environment</button>
-    </div>
-  </div>`;
-}
-
-function renderProductionGenerate() {
-  return `<div class="generate-panel">
-    <div class="form-group"><label>Shot Description</label><textarea id="shot-desc" rows="3" placeholder="Wide establishing shot..."></textarea></div>
-    <div class="form-group"><label>Style</label><input id="shot-style" type="text" placeholder="anamorphic, cinematic"></div>
-    <div class="form-row">
-      <div class="form-group half"><label>Width</label><input id="shot-w" type="number" value="1920"></div>
-      <div class="form-group half"><label>Height</label><input id="shot-h" type="number" value="1080"></div>
-    </div>
-    <button class="btn btn-primary" onclick="generateShot()" id="btn-shot">Generate Shot</button>
-  </div>`;
-}
-
-function showGenSub(btn, id) {
-  btn.closest('.generate-panel').querySelectorAll('.gen-sub').forEach(el => el.style.display = 'none');
-  btn.closest('.generate-tabs').querySelectorAll('.gen-tab').forEach(el => el.classList.remove('active'));
-  btn.classList.add('active');
-  document.getElementById(id).style.display = 'block';
-}
-
-// ── Generation actions ──────────────────────────────────────
-
-async function generateFreeform() {
-  const btn = document.getElementById('btn-ff'); btn.disabled = true; btn.textContent = 'Generating...';
-  try {
-    const body = { prompt: document.getElementById('ff-prompt').value, width: +document.getElementById('ff-w').value, height: +document.getElementById('ff-h').value, number_results: +document.getElementById('ff-n').value, stage: 2, artifact_type: 'concept', label: document.getElementById('ff-label').value };
-    const res = await fetch('/api/generate/image', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    const data = await res.json();
-    if (data.ok) { showToast(`Generated ${data.images.length} image(s)`); activeTab='artifacts'; await fetchPipeline(); }
-    else showToast(`Error: ${data.error}`);
-  } finally { btn.disabled = false; btn.textContent = 'Generate'; }
-}
-
-async function generateCharacter() {
-  const btn = document.getElementById('btn-ch'); btn.disabled = true; btn.textContent = 'Generating...';
-  try {
-    const res = await fetch('/api/generate/character', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name: document.getElementById('ch-name').value, description: document.getElementById('ch-desc').value, style_prompt: document.getElementById('ch-style').value }) });
-    const data = await res.json();
-    if (data.ok) { showToast('Character generated'); activeTab='artifacts'; await fetchPipeline(); } else showToast(`Error: ${data.error}`);
-  } finally { btn.disabled = false; btn.textContent = 'Generate Character Sheet'; }
-}
-
-async function generateEnvironment() {
-  const btn = document.getElementById('btn-env'); btn.disabled = true; btn.textContent = 'Generating...';
-  try {
-    const res = await fetch('/api/generate/environment', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name: document.getElementById('env-name').value, description: document.getElementById('env-desc').value, style_prompt: document.getElementById('env-style').value }) });
-    const data = await res.json();
-    if (data.ok) { showToast('Environment generated'); activeTab='artifacts'; await fetchPipeline(); } else showToast(`Error: ${data.error}`);
-  } finally { btn.disabled = false; btn.textContent = 'Generate Environment'; }
-}
-
-async function generateShot() {
-  const btn = document.getElementById('btn-shot'); btn.disabled = true; btn.textContent = 'Generating...';
-  try {
-    const res = await fetch('/api/generate/shot', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ description: document.getElementById('shot-desc').value, style_prompt: document.getElementById('shot-style').value, width: +document.getElementById('shot-w').value, height: +document.getElementById('shot-h').value }) });
-    const data = await res.json();
-    if (data.ok) { showToast('Shot generated'); activeTab='artifacts'; await fetchPipeline(); } else showToast(`Error: ${data.error}`);
-  } finally { btn.disabled = false; btn.textContent = 'Generate Shot'; }
-}
-
-async function generateCharacterFromCard(index) {
-  const btn = document.getElementById(`btn-ch-${index}`); btn.disabled = true; btn.textContent = 'Generating...';
-  try {
-    const name = document.getElementById(`ch-name-${index}`).value;
-    const desc = document.getElementById(`ch-desc-${index}`).value;
-    const style = document.getElementById(`ch-style-${index}`).value;
-    const res = await fetch('/api/generate/character', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, description: desc, style_prompt: style }) });
-    const data = await res.json();
-    if (data.ok) { showToast(`${name} generated`); await fetchPipeline(); } else showToast(`Error: ${data.error}`);
-  } finally { btn.disabled = false; btn.textContent = 'Generate'; }
-}
-
-async function generateEnvironmentFromCard(index) {
-  const btn = document.getElementById(`btn-env-${index}`); btn.disabled = true; btn.textContent = 'Generating...';
-  try {
-    const name = document.getElementById(`env-name-${index}`).value;
-    const desc = document.getElementById(`env-desc-${index}`).value;
-    const style = document.getElementById(`env-style-${index}`).value;
-    const res = await fetch('/api/generate/environment', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, description: desc, style_prompt: style }) });
-    const data = await res.json();
-    if (data.ok) { showToast(`${name} generated`); await fetchPipeline(); } else showToast(`Error: ${data.error}`);
-  } finally { btn.disabled = false; btn.textContent = 'Generate'; }
-}
-
-async function extractBriefs() {
-  const btn = document.getElementById('btn-extract-briefs');
-  if (btn) { btn.disabled = true; btn.textContent = 'Extracting...'; }
-  showToast('Extracting structured briefs from synthesis...');
-  try {
-    const res = await fetch('/api/council/briefs/extract?stage=2', { method: 'POST' });
     const data = await res.json();
     if (data.ok) {
-      wbBriefs = data.briefs;
-      const cc = data.briefs?.characters?.length || 0;
-      const ec = data.briefs?.environments?.length || 0;
-      showToast(`Extracted ${cc} characters, ${ec} environments`);
+      expertResults[expertId]._guardian = data.result;
+      notify('Context Guardian analysis complete', 'done');
+      activeOutputTab = 'guardian';
       render();
-    } else showToast(`Error: ${data.error}`);
-  } catch (e) { showToast(`Error: ${e.message}`); }
-  finally { if (btn) { btn.disabled = false; btn.textContent = 'Extract Briefs'; } }
+    } else notify(`Guardian error: ${data.error}`, 'error');
+  } catch(e) { notify(`Guardian error: ${e.message}`, 'error'); }
 }
 
-// ── Artifact actions ────────────────────────────────────────
+// ── Summarize ───────────────────────────────────────────────
 
-async function updateArtifact(stage, fn, action) {
-  const res = await fetch(`/api/artifacts/${stage}/${fn}/${action}`, { method:'POST' });
-  const data = await res.json();
-  if (data.ok) { showToast({approve:'Approved',reject:'Rejected',revision:'Revision requested'}[action]); await fetchPipeline(); }
-}
-
-async function deleteArtifact(stage, fn) {
-  if (!confirm('Delete?')) return;
-  await fetch(`/api/artifacts/${stage}/${fn}`, { method:'DELETE' });
-  showToast('Deleted'); await fetchPipeline();
-}
-
-// ── Utilities ───────────────────────────────────────────────
-
-function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-function renderMarkdown(text) {
-  let h = escapeHtml(text);
-  h = h.replace(/^### (.+)$/gm, '<h5>$1</h5>');
-  h = h.replace(/^## (.+)$/gm, '<h4>$1</h4>');
-  h = h.replace(/^# (.+)$/gm, '<h3>$1</h3>');
-  h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
-  h = h.replace(/^- (.+)$/gm, '• $1');
-  h = h.replace(/\n/g, '<br>');
-  return h;
-}
-
-function formatConfig(c) { return JSON.stringify(c,null,2).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-function openLightbox(url) { document.getElementById('lightbox-img').src = url; document.getElementById('lightbox').classList.add('visible'); }
-function closeLightbox() { document.getElementById('lightbox').classList.remove('visible'); }
-
-function showToast(msg) {
-  const t = document.getElementById('toast');
-  t.textContent = msg; t.classList.add('visible');
-  setTimeout(() => t.classList.remove('visible'), 3000);
-}
-
-function updateDeadlineCountdown() {
-  const days = Math.floor((new Date('2026-08-14T23:59:59') - new Date()) / 86400000);
-  const el = document.getElementById('countdown');
-  if (el) el.textContent = `${days} days remaining`;
-}
-
-async function reconnectActiveJobs() {
+async function summarizeExpert(expertId) {
+  notify('Summarizing...', 'info');
   try {
-    const res = await fetch('/api/jobs/active');
+    const res = await fetch(`/api/council/expert/${expertId}/summarize`, { method: 'POST' });
     const data = await res.json();
-    if (data.jobs && data.jobs.length > 0) {
-      const job = data.jobs[0];
-      currentJobId = job.job_id;
-      runningExperts = new Set(job.running_experts || []);
-      consoleStatus = { text: `${job.phase_name || ''} ${job.experts_done}/${job.experts_total}`, cls: 'running' };
-      consolePush({ time: new Date().toLocaleTimeString().substring(0, 8), message: `Reconnected to running job (${job.phase_name})`, level: 'info' });
-      streamJobProgress(job.job_id);
+    if (data.ok) { expertResults[expertId].summary = data.summary; notify('Summary ready', 'done'); render(); }
+  } catch(e) { notify('Summary failed', 'error'); }
+}
+
+// ── Curate ──────────────────────────────────────────────────
+
+async function curateOutput(expertId) {
+  const result = expertResults[expertId];
+  if (!result) return;
+  if (curatedOutputs.find(c => c.expert_id === expertId)) { notify('Already in synthesis', 'info'); return; }
+  try {
+    const res = await fetch('/api/curated', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expert_id: expertId, role: result.role, content: result.content, phase_id: result.phase_id }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      curatedOutputs.push({ expert_id: expertId, role: result.role, content: result.content, phase_id: result.phase_id });
+      notify(`${result.role} sent to synthesis`, 'done');
       render();
     }
-  } catch (e) {}
+  } catch(e) { notify('Failed to curate', 'error'); }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  fetchPipeline().then(() => reconnectActiveJobs());
-  updateDeadlineCountdown();
-  setInterval(updateDeadlineCountdown, 60000);
-  document.getElementById('lightbox').addEventListener('click', e => { if (e.target.id === 'lightbox') closeLightbox(); });
-  document.getElementById('expert-modal').addEventListener('click', e => { if (e.target.id === 'expert-modal') closeExpertModal(); });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeLightbox(); closeExpertModal(); } });
+async function removeCuratedItem(expertId) {
+  await fetch(`/api/curated/${expertId}`, { method: 'DELETE' });
+  curatedOutputs = curatedOutputs.filter(c => c.expert_id !== expertId);
+  render();
+}
+
+// ── Synthesis ───────────────────────────────────────────────
+
+async function runSynthesis() {
+  if (!curatedOutputs.length) { notify('No curated outputs', 'error'); return; }
+  notify('Running synthesis...', 'phase');
+  try {
+    const res = await fetch('/api/curated/synthesize', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) { synthesisFull = data.synthesis.content; notify('Synthesis complete', 'done'); render(); }
+    else notify(`Error: ${data.error}`, 'error');
+  } catch(e) { notify('Synthesis failed', 'error'); }
+}
+
+async function extractFilmBrief() {
+  notify('Extracting Film Brief...', 'phase');
+  try {
+    const res = await fetch('/api/film-brief/extract?stage=2', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) { filmBrief = data.brief; notify('Film Brief extracted', 'done'); render(); }
+    else notify(`Error: ${data.error}`, 'error');
+  } catch(e) { notify('Extraction failed', 'error'); }
+}
+
+// ── Modals ──────────────────────────────────────────────────
+
+function openFilmBriefModal() {
+  if (!filmBrief) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  let c = '';
+  if (filmBrief.world_summary) c += `<div style="margin-bottom:1rem"><h4 style="color:var(--accent);margin-bottom:0.5rem">World Summary</h4><p style="font-size:0.85rem;line-height:1.7">${renderMarkdown(filmBrief.world_summary)}</p></div>`;
+  if (filmBrief.narrative_arc) c += `<div style="margin-bottom:1rem"><h4 style="color:var(--accent);margin-bottom:0.5rem">Narrative Arc</h4><p style="font-size:0.85rem;line-height:1.7">${renderMarkdown(filmBrief.narrative_arc)}</p></div>`;
+
+  if (filmBrief.characters?.length) {
+    c += `<h4 style="color:var(--accent);margin-bottom:0.5rem">Characters (${filmBrief.characters.length})</h4>`;
+    for (const ch of filmBrief.characters) {
+      c += `<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:0.75rem;margin-bottom:0.5rem">
+        <strong>${escapeHtml(ch.name)}</strong> <span style="color:var(--text-muted);font-size:0.75rem">${escapeHtml(ch.role||'')}</span>
+        <p style="font-size:0.8rem;margin-top:0.25rem;color:var(--text-muted)">${escapeHtml(ch.description||'')}</p>
+      </div>`;
+    }
+  }
+
+  if (filmBrief.environments?.length) {
+    c += `<h4 style="color:var(--accent);margin:1rem 0 0.5rem">Environments (${filmBrief.environments.length})</h4>`;
+    for (const env of filmBrief.environments) {
+      c += `<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:0.75rem;margin-bottom:0.5rem">
+        <strong>${escapeHtml(env.name)}</strong> <span style="color:var(--text-muted);font-size:0.75rem">${escapeHtml(env.function||'')}</span>
+        <p style="font-size:0.8rem;margin-top:0.25rem;color:var(--text-muted)">${escapeHtml(env.description||'')}</p>
+      </div>`;
+    }
+  }
+
+  if (filmBrief.scenes?.length) {
+    c += `<h4 style="color:var(--accent);margin:1rem 0 0.5rem">Scenes (${filmBrief.scenes.length})</h4>`;
+    for (const sc of filmBrief.scenes) {
+      c += `<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:0.75rem;margin-bottom:0.5rem">
+        <strong>${escapeHtml(sc.title||`Scene ${sc.id}`)}</strong>
+        <span style="color:var(--text-muted);font-size:0.7rem;margin-left:0.5rem">${escapeHtml(sc.location||'')} | ~${sc.duration_estimate||'?'}s</span>
+        <p style="font-size:0.8rem;margin-top:0.25rem;color:var(--text-muted)">${escapeHtml(sc.description||'')}</p>
+      </div>`;
+    }
+  }
+
+  overlay.innerHTML = `<div class="modal" style="max-width:1000px"><div class="modal-header"><h3>Film Brief</h3><button class="modal-close" onclick="this.closest('.modal-overlay').remove()">&times;</button></div><div class="modal-body">${c}</div></div>`;
+  document.body.appendChild(overlay);
+}
+
+async function openExpertPromptModal(expertId) {
+  const reg = expertRegistry?.find(e => e.id === expertId);
+  if (!reg) return;
+  let promptContent = '';
+  try {
+    const res = await fetch(`/api/council/expert/${expertId}`);
+    const data = await res.json();
+    promptContent = data.prompt || '';
+  } catch(e) { notify('Failed to load prompt', 'error'); return; }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:700px">
+      <div class="modal-header">
+        <h3>${escapeHtml(reg.role)}</h3>
+        <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <textarea id="expert-prompt-editor" rows="20"
+          style="width:100%;padding:0.6rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.8rem;font-family:'SF Mono','Fira Code',monospace;line-height:1.6;resize:vertical">${escapeHtml(promptContent)}</textarea>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveExpertPrompt('${expertId}')">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+
+async function saveExpertPrompt(expertId) {
+  const textarea = document.getElementById('expert-prompt-editor');
+  if (!textarea) return;
+  try {
+    const res = await fetch(`/api/council/expert/${expertId}/prompt`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: textarea.value }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      document.querySelector('.modal-overlay')?.remove();
+      notify('Prompt saved', 'done');
+    } else notify(`Error: ${data.error}`, 'error');
+  } catch(e) { notify('Failed to save prompt', 'error'); }
+}
+
+function openCreateExpertModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:500px">
+      <div class="modal-header"><h3>Create Expert</h3><button class="modal-close" onclick="this.closest('.modal-overlay').remove()">&times;</button></div>
+      <div class="modal-body">
+        <div class="create-expert-form">
+          <div class="form-group"><label>Name</label><input id="new-expert-name" type="text" placeholder="e.g. Quantum Computing Researcher"></div>
+          <div class="form-group"><label>Description</label><textarea id="new-expert-desc" rows="3" placeholder="What does this expert know?"></textarea></div>
+          <div class="form-group"><label>Goals</label><textarea id="new-expert-goals" rows="2" placeholder="What should they produce?"></textarea></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+        <button class="btn btn-primary" onclick="createExpert()">Create</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+
+async function createExpert() {
+  const name = document.getElementById('new-expert-name')?.value;
+  const description = document.getElementById('new-expert-desc')?.value;
+  const goals = document.getElementById('new-expert-goals')?.value;
+  if (!name || !description) { notify('Name and description required', 'error'); return; }
+  notify('Creating expert...', 'info');
+  try {
+    const res = await fetch('/api/council/experts/create', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description, goals: goals || '' }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      await fetchExpertRegistry();
+      document.querySelector('.modal-overlay')?.remove();
+      notify(`Expert "${name}" created`, 'done');
+      render();
+    } else notify(`Error: ${data.error}`, 'error');
+  } catch(e) { notify('Failed to create expert', 'error'); }
+}
+
+function openResetModal() {
+  if (!confirm('Reset all outputs? This clears expert results, synthesis, curated outputs, and Film Brief.')) return;
+  resetAll();
+}
+
+async function resetAll() {
+  try {
+    await fetch('/api/stages/1/reset', { method: 'POST' });
+    await fetch('/api/stages/2/reset', { method: 'POST' });
+    await fetch('/api/curated/reset', { method: 'POST' });
+    expertResults = {}; synthesisData = {}; curatedOutputs = [];
+    synthesisFull = null; filmBrief = null; selectedOutputExpert = null;
+    revisionVault = {};
+    notify('All outputs cleared', 'done');
+    render();
+  } catch(e) { notify('Reset failed', 'error'); }
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') document.querySelector('.modal-overlay')?.remove();
 });
+
+document.addEventListener('DOMContentLoaded', init);

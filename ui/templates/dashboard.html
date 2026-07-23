@@ -3,54 +3,20 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Metanoia — Pipeline Dashboard</title>
+  <title>Metanoia — Research Studio</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div class="header">
-    <h1>Metanoia <span>Pipeline</span></h1>
+    <h1>Metanoia <span>Research Studio</span></h1>
     <div class="header-meta">
-      <span id="countdown"></span>
       <span class="deadline">Deadline: Aug 14, 2026</span>
     </div>
   </div>
 
-  <div class="container">
-    <div id="pipeline-flow" class="pipeline-flow"></div>
+  <div id="app"></div>
 
-    <div class="workspace">
-      <!-- Left: collapsible expert roster sidebar -->
-      <div id="expert-sidebar" class="expert-sidebar">
-        <div class="expert-sidebar-header">
-          <h4>Expert Roster</h4>
-          <div style="display:flex;align-items:center;gap:0.5rem">
-            <span class="expert-sidebar-count" id="expert-sidebar-count"></span>
-            <button class="btn-icon sidebar-collapse-btn" onclick="toggleExpertSidebar()" title="Collapse sidebar">◀</button>
-          </div>
-        </div>
-        <div id="expert-sidebar-list" class="expert-sidebar-list"></div>
-      </div>
-
-      <!-- Main: tabs + content -->
-      <div id="detail-panel" class="detail-panel">
-        <div id="detail-content">
-          <div class="empty-state">
-            <div class="empty-icon">←</div>
-            <p>Select a stage above to view its artifacts and configuration</p>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div id="expert-modal" class="expert-modal">
-    <div class="expert-modal-inner" id="expert-modal-body"></div>
-  </div>
-
-  <div id="lightbox" class="lightbox">
-    <img id="lightbox-img" src="" alt="Preview">
-  </div>
-  <div id="toast" class="toast"></div>
+  <div id="notifications" class="notification-container"></div>
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -38,28 +38,19 @@ phases:
   - id: governance_researcher
     role: Governance Researcher
     prompt_file: prompts/experts/governance_researcher.md
-- id: vision
-  name: Vision Synthesis
-  description: Integrate research into a unified, stress-tested vision of the future
-  mode: parallel
-  context_level: basic
-  checkpoint: true
-  experts:
-  - id: futurist_integrator
-    role: Futurist Integrator
-    prompt_file: prompts/experts/futurist_integrator.md
   - id: anthropologist
     role: Anthropologist
     prompt_file: prompts/experts/anthropologist.md
+  - id: futurist_integrator
+    role: Futurist Integrator
+    prompt_file: prompts/experts/futurist_integrator.md
   - id: psychologist
     role: Psychologist
     prompt_file: prompts/experts/psychologist.md
-  - id: historian
-    role: Historian
-    prompt_file: prompts/experts/historian.md
   - id: skeptic
     role: Skeptic / Red Team
     prompt_file: prompts/experts/skeptic.md
+  guardians: []
 - id: narrative
   name: Narrative Architecture
   description: Shape the vision into a 3-minute cinematic story
@@ -73,9 +64,6 @@ phases:
   - id: cinematic_director
     role: Cinematic Director
     prompt_file: prompts/experts/cinematic_director.md
-  - id: lore_keeper
-    role: Lore Keeper
-    prompt_file: prompts/experts/lore_keeper.md
   - id: poet
     role: Poet / Lyricist
     prompt_file: prompts/experts/poet.md

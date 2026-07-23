@@ -15,12 +15,12 @@ load_dotenv()
 FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 COUNCIL_MODELS = [
-    {"id": "anthropic-claude-opus-4-8", "name": "Claude Opus 4.8", "lab": "Anthropic", "thinking": "off"},
-    {"id": "openai-gpt-5-5", "name": "GPT-5.5", "lab": "OpenAI", "thinking": "off"},
+    {"id": "anthropic-claude-opus-4-8", "name": "Claude Opus 4.8", "lab": "Anthropic", "thinking": "none"},
+    {"id": "openai-gpt-5-5", "name": "GPT-5.5", "lab": "OpenAI", "thinking": "none"},
     {"id": "google-gemini-3-1-pro", "name": "Gemini 3.1 Pro", "lab": "Google", "thinking": "low"},
-    {"id": "xai-grok-4-3", "name": "Grok 4.3", "lab": "xAI", "thinking": "off"},
-    {"id": "alibaba-qwen3-235b", "name": "Qwen 3 235B", "lab": "Alibaba", "thinking": "off"},
-    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "lab": "DeepSeek", "thinking": "off"},
+    {"id": "xai-grok-4-3", "name": "Grok 4.3", "lab": "xAI", "thinking": "none"},
+    {"id": "alibaba-qwen3-coder-plus", "name": "Qwen 3 Coder Plus", "lab": "Alibaba", "thinking": "none"},
+    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "lab": "DeepSeek", "thinking": "none"},
 ]
 
 LABELS = ["A", "B", "C", "D", "E"]
@@ -323,10 +323,14 @@ async def run_feedback_loop(
 
         rev_results = await asyncio.gather(*revision_tasks)
         revisions = {}
+        all_unchanged = True
         for model_id, rev in rev_results:
             revisions[model_id] = rev
-            if rev.get("revision_score", 0) == 2:
+            score = rev.get("revision_score", 0)
+            if score == 2:
                 any_major = True
+            if score > 0:
+                all_unchanged = False
             statements[model_id]["text"] = rev.get("statement", statements[model_id]["text"])
 
         round_data["revisions"] = revisions
@@ -338,8 +342,12 @@ async def run_feedback_loop(
             "revisions": {},
         }
 
-        if not any_major:
-            emit(f"Convergence reached after round {round_num} — no major revisions", level="done")
+        if all_unchanged:
+            emit(f"Full convergence after round {round_num} — all models unchanged", level="done")
+            result["rounds"].append(new_round)
+            break
+        elif not any_major:
+            emit(f"Convergence reached after round {round_num} — no major revisions (minor only)", level="done")
             result["rounds"].append(new_round)
             break
         elif round_num == max_rounds:
