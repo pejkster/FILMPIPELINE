@@ -727,10 +727,12 @@ function renderGuardianTab(expertId, result) {
 }
 
 function renderFeedbackCard(expertId, itemId, text, source, inVault) {
+  const safeText = btoa(unescape(encodeURIComponent(text)));
+  const safeSource = btoa(unescape(encodeURIComponent(source)));
   return `<div class="feedback-card ${inVault ? 'in-vault' : ''}" data-item-id="${itemId}">
     <div class="feedback-card-text">${escapeHtml(text)}</div>
     <button class="btn btn-xs ${inVault ? 'btn-danger-outline' : 'btn-ghost'}"
-      onclick="toggleVaultItem('${expertId}', '${itemId}', ${JSON.stringify(escapeAttr(text))}, ${JSON.stringify(escapeAttr(source))})">
+      onclick="toggleVaultItem('${expertId}', '${itemId}', '${safeText}', '${safeSource}')">
       ${inVault ? '&minus; Remove' : '+ Vault'}
     </button>
   </div>`;
@@ -759,7 +761,9 @@ function renderRevisionVault(expertId, vault) {
   </div>`;
 }
 
-function toggleVaultItem(expertId, itemId, text, source) {
+function toggleVaultItem(expertId, itemId, textB64, sourceB64) {
+  const text = decodeURIComponent(escape(atob(textB64)));
+  const source = decodeURIComponent(escape(atob(sourceB64)));
   if (!revisionVault[expertId]) revisionVault[expertId] = [];
   const idx = revisionVault[expertId].findIndex(v => v.id === itemId);
   if (idx >= 0) revisionVault[expertId].splice(idx, 1);
