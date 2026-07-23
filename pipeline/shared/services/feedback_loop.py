@@ -134,14 +134,23 @@ def parse_json_response(text: str):
     return json.loads(text)
 
 
-async def _call_model(model_id: str, user_message: str, system_prompt: str = "", thinking_level: str = "off") -> str:
-    """Call a model via Runware text inference. Each call gets its own connection."""
-    api_key = os.getenv("RUNWARE_API_KEY")
-    if not api_key:
-        raise ValueError("RUNWARE_API_KEY not set")
+_shared_client: Runware | None = None
 
-    client = Runware(api_key=api_key)
-    await client.connect()
+
+async def _get_shared_client() -> Runware:
+    global _shared_client
+    if _shared_client is None:
+        api_key = os.getenv("RUNWARE_API_KEY")
+        if not api_key:
+            raise ValueError("RUNWARE_API_KEY not set")
+        _shared_client = Runware(api_key=api_key)
+        await _shared_client.connect()
+    return _shared_client
+
+
+async def _call_model(model_id: str, user_message: str, system_prompt: str = "", thinking_level: str = "off") -> str:
+    """Call a model via shared Runware connection."""
+    client = await _get_shared_client()
 
     settings = {
         "maxTokens": 4096,
@@ -160,13 +169,15 @@ async def _call_model(model_id: str, user_message: str, system_prompt: str = "",
     return results[0].text
 
 
-async def _call_with_retry(model, prompt, emit, system_prompt="", max_attempts=4):
+async def _call_with_retry(model, prompt, emit, system_prompt="", max_attempts=5):
     for attempt in range(max_attempts):
         try:
-            return await _call_model(model["id"], prompt, system_prompt=system_prompt, thinking_level=model.get("thinking", "off"))
+            result = await _call_model(model["id"], prompt, system_prompt=system_prompt, thinking_level=model.get("thinking", "off"))
+            await asyncio.sleep(3)
+            return result
         except Exception as e:
             if "concurrentRequestLimitExceeded" in str(e) and attempt < max_attempts - 1:
-                wait = 15 * (attempt + 1)
+                wait = 20 * (attempt + 1)
                 emit(f"  {model['name']} rate limited, retrying in {wait}s...", level="info")
                 await asyncio.sleep(wait)
             else:
