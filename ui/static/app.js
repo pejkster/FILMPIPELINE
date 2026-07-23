@@ -219,6 +219,20 @@ function render() {
   `;
 }
 
+function renderPreserveScroll() {
+  const cols = document.querySelectorAll('.workspace-col');
+  const scrolls = Array.from(cols).map(col => {
+    const body = col.querySelector('.col-body');
+    return body ? body.scrollTop : 0;
+  });
+  render();
+  const newCols = document.querySelectorAll('.workspace-col');
+  newCols.forEach((col, i) => {
+    const body = col.querySelector('.col-body');
+    if (body && scrolls[i]) body.scrollTop = scrolls[i];
+  });
+}
+
 // ── LEFT COLUMN: Research ───────────────────────────────────
 
 function getAllPhases() {
@@ -768,7 +782,7 @@ function toggleVaultItem(expertId, itemId, textB64, sourceB64) {
   const idx = revisionVault[expertId].findIndex(v => v.id === itemId);
   if (idx >= 0) revisionVault[expertId].splice(idx, 1);
   else revisionVault[expertId].push({ id: itemId, text, source });
-  render();
+  renderPreserveScroll();
 }
 
 function removeVaultItem(expertId, itemId) {
