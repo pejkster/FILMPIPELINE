@@ -874,14 +874,13 @@ async function sendForRevision(expertId) {
 
 function renderSynthesisColumn() {
   const hasCurated = curatedOutputs.length > 0;
-  const hasAnySections = Object.keys(synthSections).length > 0;
 
   let html = `
     <div class="col-header">
       <h3>Synthesis</h3>
       <div style="display:flex;gap:0.25rem">
         ${hasCurated ? `<button class="btn btn-sm btn-primary" onclick="runSynthesis()">Synthesize</button>` : ''}
-        ${hasAnySections ? `<button class="btn btn-sm" onclick="exportPDF()">Export PDF</button>` : ''}
+        <button class="btn btn-sm" onclick="exportPDF()">Export PDF</button>
       </div>
     </div>
     <div class="synth-tabs">
@@ -896,25 +895,7 @@ function renderSynthesisColumn() {
     <div class="col-body">
   `;
 
-  if (!hasAnySections && !hasCurated) {
-    html += `<div class="empty-state"><div class="empty-icon">&#x1F3AC;</div><p>Curate expert outputs from the middle column, then synthesize to populate these sections.</p></div>`;
-  } else {
-    html += renderSynthSectionBody();
-  }
-
-  if (hasCurated) {
-    html += `<details style="padding:0.5rem;border-top:1px solid var(--border)">
-      <summary style="font-size:0.72rem;cursor:pointer;color:var(--text-muted)">Curated Outputs (${curatedOutputs.length})</summary>`;
-    for (const item of curatedOutputs) {
-      html += `<div class="curated-item">
-        <div class="curated-item-header">
-          <span class="curated-item-role">${escapeHtml(item.role)}</span>
-          <button class="btn btn-xs btn-danger-outline" onclick="removeCuratedItem('${item.expert_id}')">Remove</button>
-        </div>
-      </div>`;
-    }
-    html += `</details>`;
-  }
+  html += renderSynthSectionBody();
 
   html += `</div>`;
   return html;
@@ -1475,15 +1456,7 @@ async function exportPDF() {
   } catch(e) { notify('PDF export failed', 'error'); }
 }
 
-async function extractFilmBrief() {
-  notify('Extracting Film Brief...', 'phase');
-  try {
-    const res = await fetch('/api/film-brief/extract?stage=2', { method: 'POST' });
-    const data = await res.json();
-    if (data.ok) { filmBrief = data.brief; notify('Film Brief extracted', 'done'); render(); }
-    else notify(`Error: ${data.error}`, 'error');
-  } catch(e) { notify('Extraction failed', 'error'); }
-}
+// Film Brief extraction removed — content now lives in synthesis section tabs
 
 // ── Modals ──────────────────────────────────────────────────
 
