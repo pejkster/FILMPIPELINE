@@ -1137,20 +1137,72 @@ async def reset_curated():
     return JSONResponse({"ok": True})
 
 
-CURATED_SYNTHESIS_PROMPT = """You are a synthesis expert for the Metanoia film project. You receive curated expert outputs that have been reviewed, refined, and approved.
+CURATED_SYNTHESIS_PROMPT = """You are a film production synthesizer for **Metanoia** — a 3-minute cinematic trailer about humanity's transition from scarcity to abundance (2025–2125).
 
-Produce a comprehensive synthesis with:
-1. **Unified Vision** — the cohesive narrative and world that emerges from all outputs
-2. **Key Takeaways** — the most important cross-cutting insights
-3. **Character Summary** — all characters mentioned, with key traits
-4. **World Rules** — how this world works, its internal logic
-5. **Visual Direction** — aesthetic, color, mood, lighting philosophy
-6. **Scene Opportunities** — the most cinematic moments across all outputs
-7. **Open Questions** — what still needs resolution
+You receive curated expert outputs. Your job is to synthesize them into a production-ready film document with EXACTLY these 5 sections, using these EXACT H2 headers:
 
-For each section, note which expert(s) the insights come from using [Expert Name] tags.
+## 1. Executive Summary
+- Logline (1 sentence)
+- Synopsis (1 paragraph — the emotional arc of the 3-minute trailer)
+- Core theme and central question
+- Tone and mood
+- Target audience and intended impact
 
-Be specific and production-ready. This synthesis will be used to generate a Film Brief."""
+## 2. Characters
+Define 4–6 characters who appear in the 3-minute trailer. For EACH character:
+- **Name/Title** (e.g. "The Grandmother", "The Displaced Trucker")
+- **Age, location, time period**
+- **Role in the narrative** — what they represent thematically
+- **Arc in the trailer** — what we see them do, what changes
+- **Key moment** — their most cinematic beat (1–2 sentences, visual)
+- **Emotional function** — what the audience should feel watching them
+
+Characters must form a coherent ensemble across time periods that tells the story of the transition.
+
+## 3. Environments
+Define 6–10 specific locations where scenes take place. For EACH:
+- **Name** (e.g. "Rajasthan Village Kitchen, 2034")
+- **Time period**
+- **Physical description** — what we see, architecture, landscape, weather, time of day
+- **Atmosphere** — sounds, smells, feeling
+- **Narrative function** — what happens here, which character(s)
+- **Transition markers** — what tells us this is the future (subtle, not sci-fi)
+
+Environments should span the timeline (2025→2125) and show the world changing.
+
+## 4. Visual Identity
+Production-ready visual direction for the trailer:
+- **Color palette** — specific hex colors or film references per time period / act
+- **Lighting philosophy** — natural vs artificial, direction, quality, temperature
+- **Camera language** — lens choices, movement style, framing philosophy
+- **Aspect ratio and format**
+- **Visual motifs** — recurring visual elements that thread through the trailer
+- **Texture and materiality** — grain, resolution, tactile qualities
+- **Reference films/photographers** — specific visual touchstones
+- **Transition style** — how we move between time periods visually
+
+## 5. Script & Shot List
+Write the actual trailer as a numbered shot list. For EACH shot:
+- **Shot number** (01, 02, 03...)
+- **Duration** (in seconds — total must equal ~180s)
+- **Location** (from Environments section)
+- **Character** (from Characters section, or none)
+- **Shot type** (wide, medium, close-up, extreme close-up, aerial, tracking, etc.)
+- **Camera movement** (static, slow pan, dolly, handheld, crane, etc.)
+- **Action/Description** — what we see happening (2–3 sentences, present tense, visual)
+- **Audio** — dialogue (in quotes), narration, sound design, music direction
+- **Mood/Emotion** — what this shot makes us feel
+
+Aim for 25–35 shots. Include title cards and transitions. The sequence should have a clear three-act structure within the 3 minutes.
+
+---
+
+IMPORTANT:
+- Every section must be SPECIFIC and PRODUCTION-READY — no vague language
+- Characters, environments, and shots must cross-reference each other
+- The shot list IS the trailer — it should be filmable as written
+- Draw from all expert outputs but transform research into narrative
+- This is not a summary of research — it is a film production document"""
 
 
 @app.post("/api/curated/synthesize")
@@ -1464,11 +1516,11 @@ async def split_synthesis_into_sections():
     import re as re_mod
 
     section_map = {
-        "executive_summary": [r"unified\s*vision", r"executive", r"overview", r"cross.disciplinary"],
+        "executive_summary": [r"executive\s*summary", r"unified\s*vision", r"synopsis", r"overview"],
         "characters": [r"character"],
-        "environments": [r"world\s*rules", r"environ"],
-        "visual_identity": [r"visual\s*dir", r"visual\s*ident", r"color\s*palette", r"aesthetic"],
-        "script_shots": [r"key\s*takeaway", r"script", r"shot\s*list", r"scene"],
+        "environments": [r"environ", r"location"],
+        "visual_identity": [r"visual\s*ident", r"visual\s*dir", r"color\s*palette", r"camera", r"aesthetic"],
+        "script_shots": [r"script", r"shot\s*list", r"shot\s*&", r"scene"],
     }
 
     h2_pattern = re_mod.compile(r"^##\s+(?:\d+[\.\)]\s*)?(.+)$", re_mod.MULTILINE)

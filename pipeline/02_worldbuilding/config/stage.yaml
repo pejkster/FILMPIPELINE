@@ -8,7 +8,7 @@ include_prior_stage_context: true
 llm:
   provider: runware
   model: anthropic-claude-opus-4-7
-  max_tokens: 4096
+  max_tokens: 16384
 phases:
 - id: worldbuilding
   name: World Design
