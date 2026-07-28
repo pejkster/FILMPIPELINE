@@ -18,6 +18,7 @@ let activeOutputTab = 'summary';
 
 let revisionVault = {};
 let feedbackLoopStatus = {}; // { expertId: { running, events[], startedAt, progress } }
+let editingOutput = {}; // { expertId: 'summary' | 'full' | null }
 let researchContextMode = 'basic'; // 'basic' | 'custom'
 let customContextText = '';
 let basicContextText = '';
@@ -620,20 +621,66 @@ function renderGlobalVault() {
 }
 
 function renderSummaryTab(result) {
-  let html = '';
-  if (result.summary) {
-    html += `<div class="output-summary">${renderMarkdown(result.summary)}</div>`;
+  const eid = selectedOutputExpert;
+  const editing = editingOutput[eid] === 'summary';
+  let html = `<div class="synth-edit-bar">
+    ${editing
+      ? `<button class="btn btn-xs btn-primary" onclick="saveOutputEdit('${eid}', 'summary')">Save</button>
+         <button class="btn btn-xs" onclick="cancelOutputEdit('${eid}')">Cancel</button>`
+      : `<button class="btn btn-xs" onclick="startOutputEdit('${eid}', 'summary')">Edit</button>`}
+  </div>`;
+  if (editing) {
+    html += `<div style="padding:0.5rem"><textarea class="synth-content-editor" id="output-editor-${eid}">${escapeHtml(result.summary || '')}</textarea></div>`;
+  } else if (result.summary) {
+    html += `<div class="output-summary synth-section-content">${renderMarkdown(result.summary)}</div>`;
   } else {
     html += `<div class="empty-state" style="padding:1.5rem"><p>Summary is being generated...</p></div>`;
   }
   if (result.revision_count > 0) {
-    html += `<div style="margin-top:0.5rem;font-size:0.7rem;color:var(--text-muted)">Revision ${result.revision_count} &mdash; revised at ${result.revised_at?.split('T')[0] || 'unknown'}</div>`;
+    html += `<div style="margin-top:0.5rem;padding:0 0.5rem;font-size:0.7rem;color:var(--text-muted)">Revision ${result.revision_count} &mdash; revised at ${result.revised_at?.split('T')[0] || 'unknown'}</div>`;
   }
   return html;
 }
 
 function renderFullTab(result) {
-  return `<div class="output-full">${renderMarkdown(result.content)}</div>`;
+  const eid = selectedOutputExpert;
+  const editing = editingOutput[eid] === 'full';
+  let html = `<div class="synth-edit-bar">
+    ${editing
+      ? `<button class="btn btn-xs btn-primary" onclick="saveOutputEdit('${eid}', 'full')">Save</button>
+         <button class="btn btn-xs" onclick="cancelOutputEdit('${eid}')">Cancel</button>`
+      : `<button class="btn btn-xs" onclick="startOutputEdit('${eid}', 'full')">Edit</button>`}
+  </div>`;
+  if (editing) {
+    html += `<div style="padding:0.5rem"><textarea class="synth-content-editor" id="output-editor-${eid}" style="min-height:400px">${escapeHtml(result.content || '')}</textarea></div>`;
+  } else {
+    html += `<div class="output-full synth-section-content">${renderMarkdown(result.content)}</div>`;
+  }
+  return html;
+}
+
+function startOutputEdit(expertId, tab) { editingOutput[expertId] = tab; render(); }
+function cancelOutputEdit(expertId) { editingOutput[expertId] = null; render(); }
+
+async function saveOutputEdit(expertId, tab) {
+  const textarea = document.getElementById(`output-editor-${expertId}`);
+  if (!textarea) return;
+  const content = textarea.value;
+  const field = tab === 'summary' ? 'summary' : 'content';
+
+  try {
+    const res = await fetch(`/api/council/expert/${expertId}/edit`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ field, content }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      expertResults[expertId][field] = content;
+      editingOutput[expertId] = null;
+      notify('Saved', 'done');
+      render();
+    } else notify(`Save failed: ${data.error}`, 'error');
+  } catch(e) { notify('Save failed', 'error'); }
 }
 
 function renderFeedbackConsole(expertId) {

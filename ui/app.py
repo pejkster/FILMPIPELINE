@@ -528,6 +528,24 @@ async def _summarize_expert_output(expert_id: str):
     return summary
 
 
+@app.put("/api/council/expert/{expert_id}/edit")
+async def edit_expert_output(expert_id: str, req: Request):
+    body = await req.json()
+    field = body.get("field", "content")
+    content = body.get("content", "")
+    if field not in ("content", "summary"):
+        return JSONResponse({"error": "Invalid field"}, status_code=400)
+
+    for s in [1, 2]:
+        path = _results_dir(s) / f"{expert_id}.json"
+        if path.exists():
+            data = json.loads(path.read_text())
+            data[field] = content
+            path.write_text(json.dumps(data, indent=2, default=str))
+            return JSONResponse({"ok": True})
+    return JSONResponse({"error": "Expert not found"}, status_code=404)
+
+
 @app.post("/api/council/expert/{expert_id}/summarize")
 async def summarize_expert(expert_id: str):
     try:
