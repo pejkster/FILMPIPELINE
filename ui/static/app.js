@@ -722,7 +722,14 @@ function renderFeedbackTab(expertId, result) {
   if (!fl && !isRunning) {
     html += `<div style="padding:0.75rem">
       <p style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.75rem">Run a multi-model feedback loop &mdash; 6 AI models debate and refine the output through blind peer review.</p>
-      <button class="btn btn-primary" onclick="runFeedbackLoop('${expertId}')">Run Feedback Loop</button>
+      <div style="display:flex;align-items:center;gap:0.75rem">
+        <button class="btn btn-primary" onclick="runFeedbackLoop('${expertId}')">Run Feedback Loop</button>
+        <label style="font-size:0.75rem;color:var(--text-muted);display:flex;align-items:center;gap:0.35rem">
+          Rounds <select id="fl-rounds-${expertId}" style="width:50px;padding:2px 4px;font-size:0.75rem;background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:4px">
+            <option value="1" selected>1</option><option value="2">2</option><option value="3">3</option>
+          </select>
+        </label>
+      </div>
     </div>`;
     return html;
   }
@@ -1016,7 +1023,14 @@ function renderSynthSectionFeedback(sectionId, sec) {
   if (!fl && !isRunning) {
     html += `<div style="padding:0.75rem">
       <p style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.75rem">Run a multi-model feedback loop on this section.</p>
-      <button class="btn btn-primary" onclick="runSynthSectionFeedback('${sectionId}')" ${!sec.content ? 'disabled' : ''}>Run Feedback Loop</button>
+      <div style="display:flex;align-items:center;gap:0.75rem">
+        <button class="btn btn-primary" onclick="runSynthSectionFeedback('${sectionId}')" ${!sec.content ? 'disabled' : ''}>Run Feedback Loop</button>
+        <label style="font-size:0.75rem;color:var(--text-muted);display:flex;align-items:center;gap:0.35rem">
+          Rounds <select id="fl-rounds-_synth_${sectionId}" style="width:50px;padding:2px 4px;font-size:0.75rem;background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:4px">
+            <option value="1" selected>1</option><option value="2">2</option><option value="3">3</option>
+          </select>
+        </label>
+      </div>
     </div>`;
     return html;
   }
@@ -1220,8 +1234,9 @@ function connectSSE(jobId) {
 // ── Feedback Loop ───────────────────────────────────────────
 
 async function runFeedbackLoop(expertId) {
-  // 6 models × (statement + feedback + revision) × max_rounds + analysis
-  const totalSteps = 6 + (6 + 6) * 3 + 1;
+  const roundsEl = document.getElementById(`fl-rounds-${expertId}`);
+  const maxRounds = roundsEl ? parseInt(roundsEl.value) : 1;
+  const totalSteps = 6 + (6 + 6) * maxRounds + 1;
   feedbackLoopStatus[expertId] = {
     running: true, events: [], startedAt: Date.now(),
     step: 0, totalSteps, error: false, elapsedTotal: 0,
@@ -1231,7 +1246,7 @@ async function runFeedbackLoop(expertId) {
 
   const res = await fetch(`/api/council/expert/${expertId}/feedback-loop`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ max_rounds: 3 }),
+    body: JSON.stringify({ max_rounds: maxRounds }),
   });
   const data = await res.json();
   if (!data.ok) {
@@ -1344,7 +1359,9 @@ async function runSynthSectionFeedback(sectionId) {
   if (!sec?.content) { notify('No content in this section', 'error'); return; }
 
   const sectionKey = `_synth_${sectionId}`;
-  const totalSteps = 6 + (6 + 6) * 3 + 1;
+  const roundsEl = document.getElementById(`fl-rounds-${sectionKey}`);
+  const maxRounds = roundsEl ? parseInt(roundsEl.value) : 1;
+  const totalSteps = 6 + (6 + 6) * maxRounds + 1;
   feedbackLoopStatus[sectionKey] = {
     running: true, events: [], startedAt: Date.now(),
     step: 0, totalSteps, error: false, elapsedTotal: 0,
@@ -1355,7 +1372,7 @@ async function runSynthSectionFeedback(sectionId) {
   const label = SYNTH_SECTIONS.find(s => s.id === sectionId)?.label || sectionId;
   const res = await fetch(`/api/synthesis/sections/${sectionId}/feedback-loop`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ max_rounds: 3 }),
+    body: JSON.stringify({ max_rounds: maxRounds }),
   });
   const data = await res.json();
   if (!data.ok) {

@@ -712,7 +712,7 @@ async def stream_job(job_id: str, from_log: int = 0):
 # ── Feedback Loop ────────────────────────────────────────────
 
 class StartFeedbackLoopRequest(BaseModel):
-    max_rounds: int = 3
+    max_rounds: int = 1
 
 
 @app.post("/api/council/expert/{expert_id}/feedback-loop")
