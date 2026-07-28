@@ -1407,6 +1407,18 @@ async def save_synth_section(section_id: str, req: Request):
     return JSONResponse({"ok": True})
 
 
+@app.post("/api/synthesis/sections/reset")
+async def reset_synth_sections():
+    import shutil
+    if SYNTH_SECTIONS_DIR.exists():
+        shutil.rmtree(SYNTH_SECTIONS_DIR)
+    SYNTH_SECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    synth_path = _results_dir(2) / "_synthesis.json"
+    if synth_path.exists():
+        synth_path.unlink()
+    return JSONResponse({"ok": True})
+
+
 @app.post("/api/synthesis/sections/{section_id}/feedback-loop")
 async def start_synth_section_feedback(section_id: str, req: StartFeedbackLoopRequest):
     if section_id not in SYNTH_SECTION_IDS:

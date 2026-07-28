@@ -533,6 +533,7 @@ function renderOutputsColumn() {
   let html = `<div class="col-header">
     <h3>Outputs <span class="col-count">${expertsWithResults.length} results</span></h3>
     <div style="display:flex;gap:0.25rem">
+      ${expertsWithResults.length > 0 ? `<button class="btn btn-sm btn-danger-outline" onclick="resetOutputs()">Reset</button>` : ''}
       ${selectedOutputExpert && expertResults[selectedOutputExpert]
         ? `<button class="btn btn-sm btn-success" onclick="curateOutput('${selectedOutputExpert}')">Send to Synthesis &rarr;</button>`
         : ''}
@@ -879,6 +880,7 @@ function renderSynthesisColumn() {
     <div class="col-header">
       <h3>Synthesis</h3>
       <div style="display:flex;gap:0.25rem">
+        ${Object.keys(synthSections).length > 0 || hasCurated ? `<button class="btn btn-sm btn-danger-outline" onclick="resetSynthesis()">Reset</button>` : ''}
         ${hasCurated ? `<button class="btn btn-sm btn-primary" onclick="runSynthesis()">Synthesize</button>` : ''}
         <button class="btn btn-sm" onclick="exportPDF()">Export PDF</button>
       </div>
@@ -1619,6 +1621,29 @@ async function resetAll() {
     synthesisFeedback = null; synthesisGuardian = null; activeSynthesisTab = 'content';
     revisionVault = {}; synthSections = {}; synthSectionEditing = {};
     notify('All outputs cleared', 'done');
+    render();
+  } catch(e) { notify('Reset failed', 'error'); }
+}
+
+async function resetOutputs() {
+  if (!confirm('Reset all expert outputs?')) return;
+  try {
+    await fetch('/api/stages/1/reset', { method: 'POST' });
+    await fetch('/api/stages/2/reset', { method: 'POST' });
+    expertResults = {}; selectedOutputExpert = null; revisionVault = {}; feedbackLoopStatus = {};
+    notify('Outputs cleared', 'done');
+    render();
+  } catch(e) { notify('Reset failed', 'error'); }
+}
+
+async function resetSynthesis() {
+  if (!confirm('Reset synthesis sections and curated outputs?')) return;
+  try {
+    await fetch('/api/curated/reset', { method: 'POST' });
+    await fetch('/api/synthesis/sections/reset', { method: 'POST' });
+    curatedOutputs = []; synthesisFull = null; synthSections = {}; synthSectionEditing = {};
+    synthesisFeedback = null; synthesisGuardian = null;
+    notify('Synthesis cleared', 'done');
     render();
   } catch(e) { notify('Reset failed', 'error'); }
 }
