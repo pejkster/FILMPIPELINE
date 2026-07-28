@@ -1325,35 +1325,6 @@ SYNTH_SECTIONS_DIR = PIPELINE_ROOT / "02_worldbuilding" / "outputs" / "synthesis
 
 SYNTH_SECTION_IDS = ["executive_summary", "characters", "environments", "visual_identity", "script_shots"]
 
-SPLIT_SYNTHESIS_PROMPT = """You are splitting a unified synthesis document into clearly defined sections for a film production pipeline.
-
-Given the synthesis content below, extract and organize it into these exact sections. If content for a section doesn't exist, write a brief placeholder noting what should go there.
-
-Sections:
-1. **executive_summary** — High-level vision, themes, narrative arc, logline, tone
-2. **characters** — All character profiles, arcs, relationships, motivations
-3. **environments** — All locations, worlds, settings, atmosphere descriptions
-4. **visual_identity** — Art direction, color palette, lighting, cinematography style, visual motifs
-5. **script_shots** — Scene breakdowns, shot lists, dialogue, timing, camera directions
-
-**Output format:** Return a JSON object with section IDs as keys and markdown content as values:
-
-```json
-{{
-  "executive_summary": "...",
-  "characters": "...",
-  "environments": "...",
-  "visual_identity": "...",
-  "script_shots": "..."
-}}
-```
-
-Return only the JSON object.
-
-**Synthesis content:**
-
-{content}"""
-
 
 @app.get("/api/synthesis/sections")
 async def get_synth_sections():
@@ -1488,33 +1459,57 @@ async def split_synthesis_into_sections():
     if not synth_path.exists():
         return JSONResponse({"error": "No synthesis"}, status_code=404)
     data = json.loads(synth_path.read_text())
+    content = data["content"]
 
-    import importlib
     import re as re_mod
-    council_mod = importlib.import_module("pipeline.01_llm_council.council")
-    council = council_mod.LLMCouncil()
 
-    prompt = SPLIT_SYNTHESIS_PROMPT.format(content=data["content"][:12000])
-    try:
-        response = await council._call_llm(
-            "You split synthesis documents into structured sections. Return only JSON.",
-            prompt,
-        )
-        text = response.strip()
-        match = re_mod.search(r"```(?:json)?\s*(.*?)\s*```", text, re_mod.DOTALL)
-        if match:
-            text = match.group(1)
-        sections = json.loads(text)
+    section_map = {
+        "executive_summary": [r"unified\s*vision", r"executive", r"overview", r"cross.disciplinary"],
+        "characters": [r"character"],
+        "environments": [r"world\s*rules", r"environ"],
+        "visual_identity": [r"visual\s*dir", r"visual\s*ident", r"color\s*palette", r"aesthetic"],
+        "script_shots": [r"key\s*takeaway", r"script", r"shot\s*list", r"scene"],
+    }
 
-        SYNTH_SECTIONS_DIR.mkdir(parents=True, exist_ok=True)
-        for sid in SYNTH_SECTION_IDS:
-            content = sections.get(sid, "")
-            if content:
-                (SYNTH_SECTIONS_DIR / f"{sid}.md").write_text(content)
+    h2_pattern = re_mod.compile(r"^##\s+(?:\d+[\.\)]\s*)?(.+)$", re_mod.MULTILINE)
+    matches = list(h2_pattern.finditer(content))
 
-        return JSONResponse({"ok": True, "sections": sections})
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    chunks: list[tuple[str, str]] = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+        heading = m.group(1).strip()
+        body = content[start:end].strip()
+        chunks.append((heading, body))
+
+    sections: dict[str, str] = {}
+    used = set()
+    for sid, patterns in section_map.items():
+        for heading, body in chunks:
+            if id(body) in used:
+                continue
+            for pat in patterns:
+                if re_mod.search(pat, heading, re_mod.IGNORECASE):
+                    if sid in sections:
+                        sections[sid] += "\n\n" + body
+                    else:
+                        sections[sid] = body
+                    used.add(id(body))
+                    break
+
+    remaining = [body for heading, body in chunks if id(body) not in used]
+    if remaining and "executive_summary" in sections:
+        sections["executive_summary"] += "\n\n" + "\n\n".join(remaining)
+    elif remaining:
+        sections["executive_summary"] = "\n\n".join(remaining)
+
+    SYNTH_SECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    for sid in SYNTH_SECTION_IDS:
+        text = sections.get(sid, "")
+        if text:
+            (SYNTH_SECTIONS_DIR / f"{sid}.md").write_text(text)
+
+    return JSONResponse({"ok": True, "sections": {k: v[:200] for k, v in sections.items()}})
 
 
 @app.post("/api/synthesis/export-pdf")
