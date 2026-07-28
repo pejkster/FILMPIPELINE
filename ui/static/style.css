@@ -941,16 +941,40 @@ body {
 .synth-content-editor:focus { border-color: var(--accent); outline: none; }
 
 .synth-section-content {
-  padding: 0.6rem; font-size: 0.8rem; line-height: 1.7;
+  padding: 0.6rem; font-size: 0.78rem; line-height: 1.7;
 }
-.synth-section-content h1, .synth-section-content h2, .synth-section-content h3 {
-  color: var(--accent); margin: 0.75rem 0 0.35rem;
+.synth-section-content h1, .synth-section-content h2, .synth-section-content h3, .synth-section-content h4 {
+  color: var(--accent);
 }
-.synth-section-content h1 { font-size: 1rem; }
-.synth-section-content h2 { font-size: 0.9rem; }
-.synth-section-content h3 { font-size: 0.82rem; }
+.synth-section-content h1 { font-size: 1rem; margin: 1rem 0 0.4rem; }
+.synth-section-content h2 {
+  font-size: 0.9rem; margin: 1.2rem 0 0.4rem;
+  padding-top: 0.75rem; border-top: 1px solid var(--border);
+}
+.synth-section-content h2:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+.synth-section-content h3 {
+  font-size: 0.82rem; margin: 0.9rem 0 0.3rem;
+  padding: 0.4rem 0.5rem; background: rgba(255,255,255,0.03);
+  border-left: 3px solid var(--accent); border-radius: 0 4px 4px 0;
+}
+.synth-section-content h4 {
+  font-size: 0.78rem; margin: 0.6rem 0 0.2rem; font-weight: 600;
+}
 .synth-section-content p { margin-bottom: 0.5rem; }
-.synth-section-content ul, .synth-section-content ol { padding-left: 1.2rem; margin-bottom: 0.5rem; }
+.synth-section-content ul, .synth-section-content ol {
+  padding-left: 1.2rem; margin-bottom: 0.5rem;
+}
+.synth-section-content li { margin-bottom: 0.35rem; }
+.synth-section-content strong { color: var(--text); }
+.synth-section-content hr {
+  border: none; border-top: 1px solid var(--border);
+  margin: 1rem 0;
+}
+.synth-section-content blockquote {
+  border-left: 3px solid var(--accent); padding: 0.3rem 0.6rem;
+  margin: 0.5rem 0; color: var(--text-muted); font-style: italic;
+  background: rgba(255,255,255,0.02); border-radius: 0 4px 4px 0;
+}
 
 .synth-edit-bar {
   display: flex; justify-content: flex-end; gap: 0.35rem;
