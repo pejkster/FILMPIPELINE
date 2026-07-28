@@ -374,7 +374,7 @@ async def run_feedback_loop(
             round_data = new_round
 
     # Post-hoc analysis
-    emit("Running post-hoc analysis (Claude Opus 4.8)...", level="phase")
+    emit("Running post-hoc analysis...", level="phase")
     stmts_block = ""
     for mid, s in statements.items():
         stmts_block += f'**{s["name"]}:**\n{s["text"]}\n\n'
@@ -385,14 +385,18 @@ async def run_feedback_loop(
         statements_block=stmts_block,
     )
 
-    try:
-        analysis_resp = await _call_model(COUNCIL_MODELS[0]["id"], analysis_prompt, thinking_level=COUNCIL_MODELS[0].get("thinking", "off"))
-        analysis = parse_json_response(analysis_resp)
-        result["analysis"] = analysis
-        emit("Analysis complete", level="done")
-    except Exception as e:
-        emit(f"Analysis error: {e}", level="error")
-        result["analysis"] = {"summary": f"Analysis failed: {e}", "similarities": [], "differences": []}
+    analysis_resp = await _call_with_retry(COUNCIL_MODELS[0], analysis_prompt, emit)
+    if analysis_resp:
+        try:
+            analysis = parse_json_response(analysis_resp)
+            result["analysis"] = analysis
+            emit("Analysis complete", level="done")
+        except Exception as e:
+            emit(f"Analysis parse error: {e}", level="error")
+            result["analysis"] = {"summary": f"Analysis parse failed: {e}", "score": 0, "strengths": [], "concerns": [], "suggestions": [], "strongest_ideas": []}
+    else:
+        emit("Analysis failed after retries", level="error")
+        result["analysis"] = {"summary": "Analysis call failed after retries", "score": 0, "strengths": [], "concerns": [], "suggestions": [], "strongest_ideas": []}
 
     result["completed_at"] = datetime.now().isoformat()
     emit(f"Feedback loop complete — {len(result['rounds'])} rounds, {len(statements)} models", level="done")

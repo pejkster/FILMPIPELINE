@@ -1319,6 +1319,274 @@ async def get_synthesis_guardian():
     return JSONResponse({"ok": True, "result": None})
 
 
+# ── Synthesis Sections ──────────────────────────────────────
+
+SYNTH_SECTIONS_DIR = PIPELINE_ROOT / "02_worldbuilding" / "outputs" / "synthesis_sections"
+
+SYNTH_SECTION_IDS = ["executive_summary", "characters", "environments", "visual_identity", "script_shots"]
+
+SPLIT_SYNTHESIS_PROMPT = """You are splitting a unified synthesis document into clearly defined sections for a film production pipeline.
+
+Given the synthesis content below, extract and organize it into these exact sections. If content for a section doesn't exist, write a brief placeholder noting what should go there.
+
+Sections:
+1. **executive_summary** — High-level vision, themes, narrative arc, logline, tone
+2. **characters** — All character profiles, arcs, relationships, motivations
+3. **environments** — All locations, worlds, settings, atmosphere descriptions
+4. **visual_identity** — Art direction, color palette, lighting, cinematography style, visual motifs
+5. **script_shots** — Scene breakdowns, shot lists, dialogue, timing, camera directions
+
+**Output format:** Return a JSON object with section IDs as keys and markdown content as values:
+
+```json
+{{
+  "executive_summary": "...",
+  "characters": "...",
+  "environments": "...",
+  "visual_identity": "...",
+  "script_shots": "..."
+}}
+```
+
+Return only the JSON object.
+
+**Synthesis content:**
+
+{content}"""
+
+
+@app.get("/api/synthesis/sections")
+async def get_synth_sections():
+    SYNTH_SECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    sections = {}
+    for sid in SYNTH_SECTION_IDS:
+        sec = {"content": ""}
+        content_path = SYNTH_SECTIONS_DIR / f"{sid}.md"
+        if content_path.exists():
+            sec["content"] = content_path.read_text()
+        fl_path = SYNTH_SECTIONS_DIR / f"{sid}_feedback_loop.json"
+        if fl_path.exists():
+            sec["feedbackResult"] = json.loads(fl_path.read_text())
+        g_path = SYNTH_SECTIONS_DIR / f"{sid}_guardian.json"
+        if g_path.exists():
+            sec["guardianResult"] = json.loads(g_path.read_text())
+        sections[sid] = sec
+    return JSONResponse({"ok": True, "sections": sections})
+
+
+@app.put("/api/synthesis/sections/{section_id}")
+async def save_synth_section(section_id: str, req: Request):
+    if section_id not in SYNTH_SECTION_IDS:
+        return JSONResponse({"error": "Invalid section"}, status_code=400)
+    body = await req.json()
+    SYNTH_SECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    (SYNTH_SECTIONS_DIR / f"{section_id}.md").write_text(body.get("content", ""))
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/synthesis/sections/{section_id}/feedback-loop")
+async def start_synth_section_feedback(section_id: str, req: StartFeedbackLoopRequest):
+    if section_id not in SYNTH_SECTION_IDS:
+        return JSONResponse({"error": "Invalid section"}, status_code=400)
+    content_path = SYNTH_SECTIONS_DIR / f"{section_id}.md"
+    if not content_path.exists() or not content_path.read_text().strip():
+        return JSONResponse({"error": "Section has no content"}, status_code=400)
+
+    content = content_path.read_text()
+    label = section_id.replace("_", " ").title()
+    loop_id = str(uuid.uuid4())[:8]
+    feedback_loops[loop_id] = {
+        "status": "running", "expert_id": f"_synth_{section_id}",
+        "expert_role": label, "events": [], "result": None, "error": None,
+    }
+
+    async def _run():
+        from pipeline.shared.services.feedback_loop import run_feedback_loop
+        loop = feedback_loops[loop_id]
+        try:
+            def on_event(evt):
+                loop["events"].append(evt)
+            result = await run_feedback_loop(
+                expert_output=content, expert_role=label,
+                max_rounds=req.max_rounds, on_event=on_event,
+            )
+            loop["result"] = result
+            loop["status"] = "complete"
+            SYNTH_SECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+            (SYNTH_SECTIONS_DIR / f"{section_id}_feedback_loop.json").write_text(
+                json.dumps(result, indent=2, default=str)
+            )
+        except Exception as e:
+            loop["status"] = "error"
+            loop["error"] = str(e)
+            import traceback
+            traceback.print_exc()
+
+    asyncio.create_task(_run())
+    return JSONResponse({"ok": True, "loop_id": loop_id})
+
+
+@app.get("/api/synthesis/sections/{section_id}/feedback-loop")
+async def get_synth_section_feedback(section_id: str):
+    path = SYNTH_SECTIONS_DIR / f"{section_id}_feedback_loop.json"
+    if path.exists():
+        return JSONResponse({"ok": True, "result": json.loads(path.read_text())})
+    return JSONResponse({"ok": True, "result": None})
+
+
+@app.post("/api/synthesis/sections/{section_id}/guardian")
+async def run_synth_section_guardian(section_id: str, req: RunGuardianRequest):
+    if section_id not in SYNTH_SECTION_IDS:
+        return JSONResponse({"error": "Invalid section"}, status_code=400)
+    content_path = SYNTH_SECTIONS_DIR / f"{section_id}.md"
+    if not content_path.exists() or not content_path.read_text().strip():
+        return JSONResponse({"error": "Section has no content"}, status_code=400)
+
+    content = content_path.read_text()
+    label = section_id.replace("_", " ").title()
+
+    import importlib
+    import re as re_mod
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+    council = council_mod.LLMCouncil()
+
+    sections = []
+    for ctx_id in req.contexts:
+        ctx_path = PIPELINE_ROOT / "01_llm_council" / "prompts" / "context" / f"{ctx_id}.md"
+        if not ctx_path.exists():
+            continue
+        ctx_content = ctx_path.read_text()
+        ctx_name = ctx_id.replace("_", " ").title()
+        try:
+            prompt = CONTEXT_GUARDIAN_PROMPT.format(context_name=ctx_name)
+            user_message = f"## Reference Context: {ctx_name}\n\n{ctx_content}\n\n---\n\n## {label} Section to Evaluate\n\n{content}\n\n---\n\nEvaluate this section against the reference context above. Return structured JSON."
+            response = await council._call_llm(prompt, user_message)
+            text = response.strip()
+            match = re_mod.search(r"```(?:json)?\s*(.*?)\s*```", text, re_mod.DOTALL)
+            if match:
+                text = match.group(1)
+            section = json.loads(text)
+            section["context_name"] = ctx_name
+            section["context_id"] = ctx_id
+            sections.append(section)
+        except Exception as e:
+            sections.append({
+                "context_name": ctx_name, "context_id": ctx_id,
+                "score": 0, "error": str(e),
+                "strengths": [], "concerns": [], "suggestions": [], "missing_elements": [],
+            })
+
+    result = {"sections": sections, "timestamp": datetime.now().isoformat()}
+    SYNTH_SECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    (SYNTH_SECTIONS_DIR / f"{section_id}_guardian.json").write_text(json.dumps(result, indent=2))
+    return JSONResponse({"ok": True, "result": result})
+
+
+@app.post("/api/synthesis/split-sections")
+async def split_synthesis_into_sections():
+    synth_path = _results_dir(2) / "_synthesis.json"
+    if not synth_path.exists():
+        return JSONResponse({"error": "No synthesis"}, status_code=404)
+    data = json.loads(synth_path.read_text())
+
+    import importlib
+    import re as re_mod
+    council_mod = importlib.import_module("pipeline.01_llm_council.council")
+    council = council_mod.LLMCouncil()
+
+    prompt = SPLIT_SYNTHESIS_PROMPT.format(content=data["content"][:12000])
+    try:
+        response = await council._call_llm(
+            "You split synthesis documents into structured sections. Return only JSON.",
+            prompt,
+        )
+        text = response.strip()
+        match = re_mod.search(r"```(?:json)?\s*(.*?)\s*```", text, re_mod.DOTALL)
+        if match:
+            text = match.group(1)
+        sections = json.loads(text)
+
+        SYNTH_SECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+        for sid in SYNTH_SECTION_IDS:
+            content = sections.get(sid, "")
+            if content:
+                (SYNTH_SECTIONS_DIR / f"{sid}.md").write_text(content)
+
+        return JSONResponse({"ok": True, "sections": sections})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/synthesis/export-pdf")
+async def export_synthesis_pdf():
+    from io import BytesIO
+
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+        from reportlab.lib.enums import TA_LEFT
+    except ImportError:
+        return JSONResponse({"error": "reportlab not installed. Run: pip install reportlab"}, status_code=500)
+
+    SYNTH_SECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2*cm, rightMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("SectionTitle", parent=styles["Heading1"], fontSize=16, spaceAfter=12)
+    body_style = ParagraphStyle("Body", parent=styles["Normal"], fontSize=10, leading=14, spaceAfter=8)
+    h2_style = ParagraphStyle("H2", parent=styles["Heading2"], fontSize=13, spaceAfter=8)
+
+    story = []
+    story.append(Paragraph("Metanoia — Film Production Synthesis", ParagraphStyle("Title", parent=styles["Title"], fontSize=22, spaceAfter=24)))
+    story.append(Spacer(1, 12))
+
+    section_labels = {
+        "executive_summary": "Executive Summary",
+        "characters": "Characters",
+        "environments": "Environments",
+        "visual_identity": "Visual Identity",
+        "script_shots": "Script & Shot List",
+    }
+
+    for sid in SYNTH_SECTION_IDS:
+        path = SYNTH_SECTIONS_DIR / f"{sid}.md"
+        if not path.exists():
+            continue
+        content = path.read_text().strip()
+        if not content:
+            continue
+
+        story.append(Paragraph(section_labels.get(sid, sid), title_style))
+        for line in content.split("\n"):
+            line = line.strip()
+            if not line:
+                story.append(Spacer(1, 6))
+            elif line.startswith("## "):
+                story.append(Paragraph(line[3:], h2_style))
+            elif line.startswith("# "):
+                story.append(Paragraph(line[2:], title_style))
+            elif line.startswith("- ") or line.startswith("* "):
+                story.append(Paragraph(f"• {line[2:]}", body_style))
+            else:
+                story.append(Paragraph(line, body_style))
+        story.append(PageBreak())
+
+    if len(story) <= 2:
+        return JSONResponse({"error": "No section content to export"}, status_code=400)
+
+    doc.build(story)
+    buf.seek(0)
+    from starlette.responses import Response
+    return Response(
+        content=buf.read(),
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=metanoia-synthesis.pdf"},
+    )
+
+
 # ── Synthesis ────────────────────────────────────────────────
 
 @app.get("/api/council/synthesis")

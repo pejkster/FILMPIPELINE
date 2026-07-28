@@ -17,6 +17,7 @@ let selectedPhase = null;
 let activeOutputTab = 'summary';
 
 let revisionVault = {};
+let feedbackLoopStatus = {}; // { expertId: { running, events[], startedAt, progress } }
 let researchContextMode = 'basic'; // 'basic' | 'custom'
 let customContextText = '';
 let basicContextText = '';
@@ -24,6 +25,18 @@ let basicContextText = '';
 let synthesisFeedback = null;
 let synthesisGuardian = null;
 let activeSynthesisTab = 'content'; // 'content' | 'feedback' | 'guardian'
+
+const SYNTH_SECTIONS = [
+  { id: 'executive_summary', label: 'Executive Summary' },
+  { id: 'characters', label: 'Characters' },
+  { id: 'environments', label: 'Environments' },
+  { id: 'visual_identity', label: 'Visual Identity' },
+  { id: 'script_shots', label: 'Script & Shots' },
+];
+let activeSynthSection = 'executive_summary';
+let activeSynthSubTab = 'content'; // 'content' | 'feedback' | 'guardian'
+let synthSections = {}; // { section_id: { content, feedbackResult, guardianResult } }
+let synthSectionEditing = {}; // { section_id: true/false }
 
 let dragData = null; // {expertId, role, prompt_file, fromPhase}
 
@@ -200,7 +213,7 @@ async function init() {
   await Promise.all([
     fetchCouncilData(), fetchExpertResults(), fetchExpertRegistry(),
     fetchSynthesis(), fetchCuratedOutputs(), fetchFilmBrief(), fetchAvailableContexts(),
-    fetchSynthesisFeedback(), fetchSynthesisGuardian(),
+    fetchSynthesisFeedback(), fetchSynthesisGuardian(), fetchSynthSections(),
   ]);
   await fetchActiveJobs();
   render();
@@ -209,6 +222,12 @@ async function init() {
 // ── Main Render ─────────────────────────────────────────────
 
 function render() {
+  const cols = document.querySelectorAll('.workspace-col');
+  const scrolls = Array.from(cols).map(col => {
+    const body = col.querySelector('.col-body');
+    return body ? body.scrollTop : 0;
+  });
+
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="workspace">
@@ -217,20 +236,16 @@ function render() {
       <div class="workspace-col">${renderSynthesisColumn()}</div>
     </div>
   `;
-}
 
-function renderPreserveScroll() {
-  const cols = document.querySelectorAll('.workspace-col');
-  const scrolls = Array.from(cols).map(col => {
-    const body = col.querySelector('.col-body');
-    return body ? body.scrollTop : 0;
-  });
-  render();
   const newCols = document.querySelectorAll('.workspace-col');
   newCols.forEach((col, i) => {
     const body = col.querySelector('.col-body');
     if (body && scrolls[i]) body.scrollTop = scrolls[i];
   });
+}
+
+function renderPreserveScroll() {
+  render();
 }
 
 // ── LEFT COLUMN: Research ───────────────────────────────────
@@ -620,17 +635,51 @@ function renderFullTab(result) {
   return `<div class="output-full">${renderMarkdown(result.content)}</div>`;
 }
 
+function renderFeedbackConsole(expertId) {
+  const status = feedbackLoopStatus[expertId];
+  if (!status || !status.running && status.events.length === 0) return '';
+
+  const elapsed = status.running ? Math.floor((Date.now() - status.startedAt) / 1000) : status.elapsedTotal || 0;
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+
+  const pct = Math.min(100, Math.round((status.step / status.totalSteps) * 100));
+  const barColor = status.running ? 'var(--accent)' : (status.error ? 'var(--danger)' : 'var(--success)');
+
+  let html = `<div class="fl-console">
+    <div class="fl-console-header">
+      <span class="fl-console-title">${status.running ? '⟳ Running' : (status.error ? 'Failed' : 'Complete')}</span>
+      <span class="fl-console-time">${timeStr}</span>
+    </div>
+    <div class="fl-progress-bar"><div class="fl-progress-fill" style="width:${pct}%;background:${barColor}"></div></div>
+    <div class="fl-console-log" id="fl-console-log-${expertId}">`;
+  for (const evt of status.events) {
+    const lvlClass = evt.level === 'error' ? 'fl-log-error' : evt.level === 'phase' ? 'fl-log-phase' : evt.level === 'done' ? 'fl-log-done' : '';
+    html += `<div class="fl-log-line ${lvlClass}"><span class="fl-log-time">${evt.time || ''}</span>${escapeHtml(evt.message)}</div>`;
+  }
+  html += `</div></div>`;
+  return html;
+}
+
 function renderFeedbackTab(expertId, result) {
   let html = '';
   const fl = result._feedbackResult;
 
-  if (!fl) {
+  html += renderFeedbackConsole(expertId);
+
+  const status = feedbackLoopStatus[expertId];
+  const isRunning = status?.running;
+
+  if (!fl && !isRunning) {
     html += `<div style="padding:0.75rem">
       <p style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.75rem">Run a multi-model feedback loop &mdash; 6 AI models debate and refine the output through blind peer review.</p>
       <button class="btn btn-primary" onclick="runFeedbackLoop('${expertId}')">Run Feedback Loop</button>
     </div>`;
     return html;
   }
+
+  if (!fl) return html;
 
   if (fl.analysis) {
     const a = fl.analysis;
@@ -824,78 +873,116 @@ async function sendForRevision(expertId) {
 // ── RIGHT COLUMN: Synthesis ─────────────────────────────────
 
 function renderSynthesisColumn() {
+  const hasCurated = curatedOutputs.length > 0;
+  const hasAnySections = Object.keys(synthSections).length > 0;
+
   let html = `
     <div class="col-header">
-      <h3>Synthesis <span class="col-count">${curatedOutputs.length} curated</span></h3>
+      <h3>Synthesis</h3>
       <div style="display:flex;gap:0.25rem">
-        ${curatedOutputs.length > 0 ? `<button class="btn btn-sm btn-primary" onclick="runSynthesis()">Synthesize</button>` : ''}
-        ${synthesisFull ? `<button class="btn btn-sm" onclick="extractFilmBrief()">Film Brief</button>` : ''}
+        ${hasCurated ? `<button class="btn btn-sm btn-primary" onclick="runSynthesis()">Synthesize</button>` : ''}
+        ${hasAnySections ? `<button class="btn btn-sm" onclick="exportPDF()">Export PDF</button>` : ''}
       </div>
+    </div>
+    <div class="synth-tabs">
+      ${SYNTH_SECTIONS.map(s => {
+        const sec = synthSections[s.id];
+        const hasContent = sec?.content;
+        return `<button class="synth-tab ${activeSynthSection === s.id ? 'active' : ''}" onclick="setSynthSection('${s.id}')">
+          ${s.label}${hasContent ? ' <span style="color:var(--success);font-size:0.6rem">&#9679;</span>' : ''}
+        </button>`;
+      }).join('')}
     </div>
     <div class="col-body">
   `;
 
-  if (curatedOutputs.length === 0 && !synthesisFull && !filmBrief) {
-    html += `<div class="empty-state"><div class="empty-icon">&#x1F3AC;</div><p>Refine expert outputs, then send them here. Synthesize into a unified vision when ready.</p></div>`;
-    html += '</div>';
-    return html;
+  if (!hasAnySections && !hasCurated) {
+    html += `<div class="empty-state"><div class="empty-icon">&#x1F3AC;</div><p>Curate expert outputs from the middle column, then synthesize to populate these sections.</p></div>`;
+  } else {
+    html += renderSynthSectionBody();
   }
 
-  if (filmBrief) {
-    html += `<div style="margin-bottom:0.75rem">
-      <button class="btn btn-sm btn-success" onclick="openFilmBriefModal()" style="width:100%">
-        View Film Brief ${filmBrief.characters ? `(${filmBrief.characters.length} chars, ${filmBrief.environments?.length || 0} envs, ${filmBrief.scenes?.length || 0} scenes)` : ''}
-      </button>
-    </div>`;
-  }
-
-  if (synthesisFull) {
-    html += `<div class="synthesis-output">
-      <div class="output-tabs" style="margin-bottom:0.5rem">
-        <button class="tab-btn ${activeSynthesisTab === 'content' ? 'active' : ''}" onclick="setSynthesisTab('content')">Content</button>
-        <button class="tab-btn ${activeSynthesisTab === 'feedback' ? 'active' : ''}" onclick="setSynthesisTab('feedback')">Feedback Loop${synthesisFeedback ? ' ✓' : ''}</button>
-        <button class="tab-btn ${activeSynthesisTab === 'guardian' ? 'active' : ''}" onclick="setSynthesisTab('guardian')">Guardian${synthesisGuardian ? ' ✓' : ''}</button>
-      </div>
-      ${activeSynthesisTab === 'content' ? `<div class="synthesis-content" style="overflow-y:auto">${renderMarkdown(synthesisFull)}</div>` : ''}
-      ${activeSynthesisTab === 'feedback' ? renderSynthesisFeedbackTab() : ''}
-      ${activeSynthesisTab === 'guardian' ? renderSynthesisGuardianTab() : ''}
-    </div>`;
-  }
-
-  if (curatedOutputs.length > 0) {
-    html += `<div style="margin-top:0.75rem"><h4 style="font-size:0.78rem;color:var(--text-muted);margin-bottom:0.5rem">Curated Outputs</h4>`;
+  if (hasCurated) {
+    html += `<details style="padding:0.5rem;border-top:1px solid var(--border)">
+      <summary style="font-size:0.72rem;cursor:pointer;color:var(--text-muted)">Curated Outputs (${curatedOutputs.length})</summary>`;
     for (const item of curatedOutputs) {
       html += `<div class="curated-item">
         <div class="curated-item-header">
           <span class="curated-item-role">${escapeHtml(item.role)}</span>
-          <span class="curated-item-source">${escapeHtml(item.phase_id || '')}</span>
-        </div>
-        <div class="curated-item-preview">${escapeHtml(item.content?.substring(0, 200) || '')}...</div>
-        <div class="curated-item-actions">
-          <button class="btn btn-xs btn-ghost" onclick="selectExpertOutput('${item.expert_id}')">View</button>
           <button class="btn btn-xs btn-danger-outline" onclick="removeCuratedItem('${item.expert_id}')">Remove</button>
         </div>
       </div>`;
     }
-    html += `</div>`;
+    html += `</details>`;
   }
 
   html += `</div>`;
   return html;
 }
 
-function setSynthesisTab(tab) { activeSynthesisTab = tab; render(); }
+function setSynthSection(sectionId) { activeSynthSection = sectionId; activeSynthSubTab = 'content'; render(); }
+function setSynthSubTab(tab) { activeSynthSubTab = tab; render(); }
 
-function renderSynthesisFeedbackTab() {
-  if (!synthesisFeedback) {
-    return `<div style="padding:0.75rem">
-      <p style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.75rem">Run a multi-model feedback loop on the synthesis &mdash; 6 AI models debate and refine the output.</p>
-      <button class="btn btn-primary" onclick="runSynthesisFeedbackLoop()">Run Feedback Loop</button>
-    </div>`;
+function renderSynthSectionBody() {
+  const sec = synthSections[activeSynthSection] || {};
+  const sectionKey = `_synth_${activeSynthSection}`;
+  const hasFeedback = !!sec.feedbackResult;
+  const hasGuardian = !!sec.guardianResult;
+
+  let html = `<div class="synth-sub-tabs">
+    <button class="synth-sub-tab ${activeSynthSubTab === 'content' ? 'active' : ''}" onclick="setSynthSubTab('content')">Content</button>
+    <button class="synth-sub-tab ${activeSynthSubTab === 'feedback' ? 'active' : ''}" onclick="setSynthSubTab('feedback')">Feedback Loop${hasFeedback ? ' &#10003;' : ''}</button>
+    <button class="synth-sub-tab ${activeSynthSubTab === 'guardian' ? 'active' : ''}" onclick="setSynthSubTab('guardian')">Guardian${hasGuardian ? ' &#10003;' : ''}</button>
+  </div>`;
+
+  if (activeSynthSubTab === 'content') {
+    html += renderSynthSectionContent(activeSynthSection, sec);
+  } else if (activeSynthSubTab === 'feedback') {
+    html += renderSynthSectionFeedback(activeSynthSection, sec);
+  } else if (activeSynthSubTab === 'guardian') {
+    html += renderSynthSectionGuardian(activeSynthSection, sec);
   }
+  return html;
+}
 
-  let html = '';
-  const fl = synthesisFeedback;
+function renderSynthSectionContent(sectionId, sec) {
+  const editing = synthSectionEditing[sectionId];
+  let html = `<div class="synth-edit-bar">
+    ${editing
+      ? `<button class="btn btn-xs btn-primary" onclick="saveSynthSection('${sectionId}')">Save</button>
+         <button class="btn btn-xs" onclick="cancelSynthEdit('${sectionId}')">Cancel</button>`
+      : `<button class="btn btn-xs" onclick="editSynthSection('${sectionId}')">Edit</button>`}
+  </div>`;
+
+  if (editing) {
+    html += `<div style="padding:0.5rem">
+      <textarea class="synth-content-editor" id="synth-editor-${sectionId}">${escapeHtml(sec.content || '')}</textarea>
+    </div>`;
+  } else if (sec.content) {
+    html += `<div class="synth-section-content">${renderMarkdown(sec.content)}</div>`;
+  } else {
+    html += `<div class="empty-state" style="padding:2rem"><p>No content yet. Run synthesis or click Edit to write manually.</p></div>`;
+  }
+  return html;
+}
+
+function renderSynthSectionFeedback(sectionId, sec) {
+  const sectionKey = `_synth_${sectionId}`;
+  let html = renderFeedbackConsole(sectionKey);
+
+  const fl = sec.feedbackResult;
+  const status = feedbackLoopStatus[sectionKey];
+  const isRunning = status?.running;
+
+  if (!fl && !isRunning) {
+    html += `<div style="padding:0.75rem">
+      <p style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.75rem">Run a multi-model feedback loop on this section.</p>
+      <button class="btn btn-primary" onclick="runSynthSectionFeedback('${sectionId}')" ${!sec.content ? 'disabled' : ''}>Run Feedback Loop</button>
+    </div>`;
+    return html;
+  }
+  if (!fl) return html;
+
   if (fl.analysis) {
     const a = fl.analysis;
     html += `<div style="padding:0.75rem;border-bottom:1px solid var(--border)">
@@ -917,9 +1004,9 @@ function renderSynthesisFeedbackTab() {
         html += `<div class="feedback-section"><h5 class="feedback-section-title" style="color:${cat.color}">${cat.title}</h5>`;
         items.forEach((item, i) => {
           const itemId = item.id || `sfl_${cat.key}_${i}`;
-          const text = typeof item === 'string' ? item : item.text || `${item.theme}: ${item.detail}`;
-          const inVault = (revisionVault['_synthesis'] || []).find(v => v.id === itemId);
-          html += renderFeedbackCard('_synthesis', itemId, text, `Synthesis Feedback — ${cat.title}`, inVault);
+          const text = typeof item === 'string' ? item : item.text || '';
+          const inVault = (revisionVault[sectionKey] || []).find(v => v.id === itemId);
+          html += renderFeedbackCard(sectionKey, itemId, text, `${SYNTH_SECTIONS.find(s=>s.id===sectionId)?.label} Feedback — ${cat.title}`, inVault);
         });
         html += `</div>`;
       }
@@ -927,73 +1014,56 @@ function renderSynthesisFeedbackTab() {
     html += `</div>`;
   }
 
-  const lastRound = fl.rounds?.[fl.rounds.length - 1];
-  if (lastRound?.statements) {
-    html += `<details style="padding:0.5rem"><summary style="font-size:0.75rem;cursor:pointer;color:var(--text-muted)">Final Model Statements (${Object.keys(lastRound.statements).length})</summary>`;
-    for (const [mid, stmt] of Object.entries(lastRound.statements)) {
-      html += `<div class="fl-statement-card">
-        <div class="fl-statement-model">${escapeHtml(stmt.name)}</div>
-        <div class="fl-statement-text">${renderMarkdown(stmt.text)}</div>
-      </div>`;
-    }
-    html += `</details>`;
-  }
-
-  html += `<div style="padding:0.5rem"><button class="btn btn-sm" onclick="runSynthesisFeedbackLoop()">Re-run Feedback Loop</button></div>`;
+  html += `<div style="padding:0.5rem"><button class="btn btn-sm" onclick="runSynthSectionFeedback('${sectionId}')">Re-run Feedback Loop</button></div>`;
   return html;
 }
 
-function renderSynthesisGuardianTab() {
+function renderSynthSectionGuardian(sectionId, sec) {
+  const guardian = sec.guardianResult;
   let html = `<div style="padding:0.75rem;border-bottom:1px solid var(--border)">
     <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem">
       <span style="font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;font-weight:600">Check against:</span>
       ${availableContexts.map(ctx => `
         <label style="display:flex;align-items:center;gap:0.25rem;font-size:0.72rem;cursor:pointer">
-          <input type="checkbox" class="synth-guardian-ctx-check" value="${escapeAttr(ctx.id)}"
+          <input type="checkbox" class="synth-sec-guardian-ctx" value="${escapeAttr(ctx.id)}"
             ${['disordine','futurax'].includes(ctx.id) ? 'checked' : ''} style="accent-color:var(--accent)">
           ${escapeHtml(ctx.name)}
         </label>
       `).join('')}
     </div>
-    <details>
-      <summary style="font-size:0.7rem;color:var(--text-muted);cursor:pointer">Add custom context</summary>
-      <textarea id="synth-guardian-custom-ctx" rows="3" placeholder="Paste or type custom context here..."
-        style="width:100%;margin-top:0.35rem;padding:0.4rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.75rem;font-family:inherit;resize:vertical"></textarea>
-    </details>
-    <button class="btn btn-sm btn-primary" onclick="runSynthesisGuardian()" style="margin-top:0.5rem">
-      ${synthesisGuardian ? 'Re-run' : 'Run'} Context Guardian
+    <button class="btn btn-sm btn-primary" onclick="runSynthSectionGuardian('${sectionId}')" style="margin-top:0.25rem"
+      ${!sec.content ? 'disabled' : ''}>
+      ${guardian ? 'Re-run' : 'Run'} Context Guardian
     </button>
   </div>`;
 
-  if (!synthesisGuardian) {
-    html += `<div style="padding:0.75rem"><div class="empty-state"><p>Select contexts above and run the guardian to check synthesis alignment.</p></div></div>`;
+  if (!guardian) {
+    html += `<div style="padding:0.75rem"><div class="empty-state"><p>Select contexts above and run the guardian.</p></div></div>`;
     return html;
   }
 
-  if (synthesisGuardian.sections) {
-    for (const section of synthesisGuardian.sections) {
+  if (guardian.sections) {
+    for (const section of guardian.sections) {
       html += `<div style="padding:0.75rem;border-bottom:1px solid var(--border)">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">
           <h5 style="font-size:0.8rem;color:var(--accent)">${escapeHtml(section.context_name)}</h5>
           <span style="font-size:1.2rem;font-weight:700;${section.score >= 7 ? 'color:var(--success)' : section.score >= 4 ? 'color:var(--warning)' : 'color:var(--danger)'}">${section.score}/10</span>
         </div>`;
-      if (section.error) {
-        html += `<div style="color:var(--danger);font-size:0.75rem">Error: ${escapeHtml(section.error)}</div>`;
-      } else {
-        const categories = [
-          { key: 'strengths', title: 'Strengths', color: 'var(--success)' },
-          { key: 'concerns', title: 'Concerns', color: 'var(--danger)' },
-          { key: 'suggestions', title: 'Suggestions', color: 'var(--info)' },
-          { key: 'missing_elements', title: 'Missing Elements', color: 'var(--warning)' },
-        ];
-        for (const cat of categories) {
-          if (section[cat.key]?.length) {
-            html += `<div class="feedback-section"><h5 class="feedback-section-title" style="color:${cat.color}">${cat.title}</h5>`;
-            section[cat.key].forEach(item => {
-              html += `<div class="feedback-card"><div class="feedback-card-text">${escapeHtml(item.text)}</div></div>`;
-            });
-            html += `</div>`;
-          }
+      const categories = [
+        { key: 'strengths', title: 'Strengths', color: 'var(--success)' },
+        { key: 'concerns', title: 'Concerns', color: 'var(--danger)' },
+        { key: 'suggestions', title: 'Suggestions', color: 'var(--info)' },
+        { key: 'missing_elements', title: 'Missing Elements', color: 'var(--warning)' },
+      ];
+      for (const cat of categories) {
+        if (section[cat.key]?.length) {
+          html += `<div class="feedback-section"><h5 class="feedback-section-title" style="color:${cat.color}">${cat.title}</h5>`;
+          const sectionKey = `_synth_${sectionId}`;
+          section[cat.key].forEach(item => {
+            const inVault = (revisionVault[sectionKey] || []).find(v => v.id === item.id);
+            html += renderFeedbackCard(sectionKey, item.id, item.text, `Guardian — ${section.context_name}`, inVault);
+          });
+          html += `</div>`;
         }
       }
       html += `</div>`;
@@ -1001,6 +1071,28 @@ function renderSynthesisGuardianTab() {
   }
   return html;
 }
+
+function editSynthSection(sectionId) { synthSectionEditing[sectionId] = true; render(); }
+function cancelSynthEdit(sectionId) { synthSectionEditing[sectionId] = false; render(); }
+
+async function saveSynthSection(sectionId) {
+  const textarea = document.getElementById(`synth-editor-${sectionId}`);
+  if (!textarea) return;
+  const content = textarea.value;
+  if (!synthSections[sectionId]) synthSections[sectionId] = {};
+  synthSections[sectionId].content = content;
+  synthSectionEditing[sectionId] = false;
+
+  try {
+    await fetch(`/api/synthesis/sections/${sectionId}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+  } catch(e) { notify('Failed to save section', 'error'); }
+  render();
+}
+
+function setSynthesisTab(tab) { activeSynthesisTab = tab; render(); }
 
 // ── Actions ─────────────────────────────────────────────────
 
@@ -1089,33 +1181,95 @@ function connectSSE(jobId) {
 // ── Feedback Loop ───────────────────────────────────────────
 
 async function runFeedbackLoop(expertId) {
-  notify(`Starting feedback loop for ${expertResults[expertId]?.role || expertId}...`, 'phase');
+  // 6 models × (statement + feedback + revision) × max_rounds + analysis
+  const totalSteps = 6 + (6 + 6) * 3 + 1;
+  feedbackLoopStatus[expertId] = {
+    running: true, events: [], startedAt: Date.now(),
+    step: 0, totalSteps, error: false, elapsedTotal: 0,
+  };
+  activeOutputTab = 'feedback';
+  render();
+
   const res = await fetch(`/api/council/expert/${expertId}/feedback-loop`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ max_rounds: 3 }),
   });
   const data = await res.json();
-  if (!data.ok) { notify('Failed to start feedback loop', 'error'); return; }
+  if (!data.ok) {
+    feedbackLoopStatus[expertId].running = false;
+    feedbackLoopStatus[expertId].error = true;
+    feedbackLoopStatus[expertId].events.push({ time: '', message: 'Failed to start', level: 'error' });
+    render();
+    return;
+  }
+
+  // Timer to update elapsed time display
+  const timer = setInterval(() => {
+    if (!feedbackLoopStatus[expertId]?.running) { clearInterval(timer); return; }
+    updateFeedbackConsole(expertId);
+  }, 1000);
 
   const evtSource = new EventSource(`/api/feedback-loops/${data.loop_id}/stream`);
   evtSource.onmessage = async (event) => {
     const evt = JSON.parse(event.data);
-    if (evt.type === 'log' && ['phase','done','error'].includes(evt.level)) {
-      notify(evt.message, evt.level === 'error' ? 'error' : 'info');
+    const status = feedbackLoopStatus[expertId];
+    if (!status) return;
+
+    if (evt.type === 'log') {
+      status.events.push({ time: evt.time, message: evt.message, level: evt.level });
+      if (['start', 'done'].includes(evt.level)) status.step++;
+      updateFeedbackConsole(expertId);
     }
     if (evt.type === 'done') {
+      clearInterval(timer);
       evtSource.close();
+      status.running = false;
+      status.error = evt.status === 'error';
+      status.elapsedTotal = Math.floor((Date.now() - status.startedAt) / 1000);
       const flRes = await fetch(`/api/council/expert/${expertId}/feedback-loop`);
       const flData = await flRes.json();
       if (flData.result) {
         expertResults[expertId]._feedbackResult = flData.result;
-        notify('Feedback loop complete', 'done');
-        activeOutputTab = 'feedback';
         render();
+      } else {
+        updateFeedbackConsole(expertId);
       }
     }
   };
-  evtSource.onerror = () => evtSource.close();
+  evtSource.onerror = () => { clearInterval(timer); evtSource.close(); };
+}
+
+function updateFeedbackConsole(expertId) {
+  const container = document.getElementById(`fl-console-log-${expertId}`);
+  const headerEl = document.querySelector('.fl-console-header');
+  const progressEl = document.querySelector('.fl-progress-fill');
+  const status = feedbackLoopStatus[expertId];
+  if (!status) return;
+
+  if (container) {
+    let logHtml = '';
+    for (const evt of status.events) {
+      const lvlClass = evt.level === 'error' ? 'fl-log-error' : evt.level === 'phase' ? 'fl-log-phase' : evt.level === 'done' ? 'fl-log-done' : '';
+      logHtml += `<div class="fl-log-line ${lvlClass}"><span class="fl-log-time">${evt.time || ''}</span>${escapeHtml(evt.message)}</div>`;
+    }
+    container.innerHTML = logHtml;
+    container.scrollTop = container.scrollHeight;
+  }
+
+  const elapsed = status.running ? Math.floor((Date.now() - status.startedAt) / 1000) : status.elapsedTotal || 0;
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+
+  if (headerEl) {
+    headerEl.querySelector('.fl-console-title').textContent = status.running ? '⟳ Running' : (status.error ? 'Failed' : 'Complete');
+    headerEl.querySelector('.fl-console-time').textContent = timeStr;
+  }
+  if (progressEl) {
+    const pct = Math.min(100, Math.round((status.step / status.totalSteps) * 100));
+    progressEl.style.width = `${pct}%`;
+    progressEl.style.background = status.running ? 'var(--accent)' : (status.error ? 'var(--danger)' : 'var(--success)');
+  }
 }
 
 // ── Context Guardian ────────────────────────────────────────
@@ -1144,53 +1298,91 @@ async function runContextGuardian(expertId) {
   } catch(e) { notify(`Guardian error: ${e.message}`, 'error'); }
 }
 
-// ── Synthesis Feedback Loop & Guardian ──────────────────────
+// ── Synthesis Section Feedback Loop & Guardian ───────────────
 
-async function runSynthesisFeedbackLoop() {
-  notify('Starting feedback loop on synthesis...', 'phase');
-  const res = await fetch('/api/synthesis/feedback-loop', {
+async function runSynthSectionFeedback(sectionId) {
+  const sec = synthSections[sectionId];
+  if (!sec?.content) { notify('No content in this section', 'error'); return; }
+
+  const sectionKey = `_synth_${sectionId}`;
+  const totalSteps = 6 + (6 + 6) * 3 + 1;
+  feedbackLoopStatus[sectionKey] = {
+    running: true, events: [], startedAt: Date.now(),
+    step: 0, totalSteps, error: false, elapsedTotal: 0,
+  };
+  activeSynthSubTab = 'feedback';
+  render();
+
+  const label = SYNTH_SECTIONS.find(s => s.id === sectionId)?.label || sectionId;
+  const res = await fetch(`/api/synthesis/sections/${sectionId}/feedback-loop`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ max_rounds: 3 }),
   });
   const data = await res.json();
-  if (!data.ok) { notify('Failed to start synthesis feedback loop', 'error'); return; }
+  if (!data.ok) {
+    feedbackLoopStatus[sectionKey].running = false;
+    feedbackLoopStatus[sectionKey].error = true;
+    feedbackLoopStatus[sectionKey].events.push({ time: '', message: 'Failed to start', level: 'error' });
+    render();
+    return;
+  }
+
+  const timer = setInterval(() => {
+    if (!feedbackLoopStatus[sectionKey]?.running) { clearInterval(timer); return; }
+    updateFeedbackConsole(sectionKey);
+  }, 1000);
 
   const evtSource = new EventSource(`/api/feedback-loops/${data.loop_id}/stream`);
   evtSource.onmessage = async (event) => {
     const evt = JSON.parse(event.data);
-    if (evt.type === 'log' && ['phase','done','error'].includes(evt.level)) {
-      notify(evt.message, evt.level === 'error' ? 'error' : 'info');
+    const status = feedbackLoopStatus[sectionKey];
+    if (!status) return;
+
+    if (evt.type === 'log') {
+      status.events.push({ time: evt.time, message: evt.message, level: evt.level });
+      if (['start', 'done'].includes(evt.level)) status.step++;
+      updateFeedbackConsole(sectionKey);
     }
     if (evt.type === 'done') {
+      clearInterval(timer);
       evtSource.close();
-      await fetchSynthesisFeedback();
-      notify('Synthesis feedback loop complete', 'done');
-      activeSynthesisTab = 'feedback';
-      render();
+      status.running = false;
+      status.error = evt.status === 'error';
+      status.elapsedTotal = Math.floor((Date.now() - status.startedAt) / 1000);
+      const flRes = await fetch(`/api/synthesis/sections/${sectionId}/feedback-loop`);
+      const flData = await flRes.json();
+      if (flData.result) {
+        if (!synthSections[sectionId]) synthSections[sectionId] = {};
+        synthSections[sectionId].feedbackResult = flData.result;
+        render();
+      } else {
+        updateFeedbackConsole(sectionKey);
+      }
     }
   };
-  evtSource.onerror = () => evtSource.close();
+  evtSource.onerror = () => { clearInterval(timer); evtSource.close(); };
 }
 
-async function runSynthesisGuardian() {
-  const checkboxes = document.querySelectorAll('.synth-guardian-ctx-check:checked');
+async function runSynthSectionGuardian(sectionId) {
+  const sec = synthSections[sectionId];
+  if (!sec?.content) { notify('No content in this section', 'error'); return; }
+
+  const checkboxes = document.querySelectorAll('.synth-sec-guardian-ctx:checked');
   const contexts = Array.from(checkboxes).map(cb => cb.value);
-  const customText = document.getElementById('synth-guardian-custom-ctx')?.value || '';
-  if (contexts.length === 0 && !customText.trim()) {
-    notify('Select at least one context or provide custom text', 'error');
-    return;
-  }
-  notify(`Running Context Guardian on synthesis (${contexts.length} contexts)...`, 'phase');
+  if (contexts.length === 0) { notify('Select at least one context', 'error'); return; }
+
+  const label = SYNTH_SECTIONS.find(s => s.id === sectionId)?.label || sectionId;
+  notify(`Running Guardian on ${label}...`, 'phase');
   try {
-    const res = await fetch('/api/synthesis/context-guardian', {
+    const res = await fetch(`/api/synthesis/sections/${sectionId}/guardian`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contexts, custom_text: customText }),
+      body: JSON.stringify({ contexts }),
     });
     const data = await res.json();
     if (data.ok) {
-      synthesisGuardian = data.result;
-      notify('Synthesis Context Guardian complete', 'done');
-      activeSynthesisTab = 'guardian';
+      if (!synthSections[sectionId]) synthSections[sectionId] = {};
+      synthSections[sectionId].guardianResult = data.result;
+      notify('Guardian complete', 'done');
       render();
     } else notify(`Guardian error: ${data.error}`, 'error');
   } catch(e) { notify(`Guardian error: ${e.message}`, 'error'); }
@@ -1237,13 +1429,50 @@ async function removeCuratedItem(expertId) {
 
 async function runSynthesis() {
   if (!curatedOutputs.length) { notify('No curated outputs', 'error'); return; }
-  notify('Running synthesis...', 'phase');
+  notify('Running synthesis — splitting into sections...', 'phase');
   try {
     const res = await fetch('/api/curated/synthesize', { method: 'POST' });
     const data = await res.json();
-    if (data.ok) { synthesisFull = data.synthesis.content; notify('Synthesis complete', 'done'); render(); }
-    else notify(`Error: ${data.error}`, 'error');
+    if (data.ok) {
+      synthesisFull = data.synthesis.content;
+      notify('Splitting into sections...', 'info');
+      try { await fetch('/api/synthesis/split-sections', { method: 'POST' }); } catch(e) {}
+      await fetchSynthSections();
+      notify('Synthesis complete', 'done');
+      render();
+    } else notify(`Error: ${data.error}`, 'error');
   } catch(e) { notify('Synthesis failed', 'error'); }
+}
+
+async function fetchSynthSections() {
+  try {
+    const res = await fetch('/api/synthesis/sections');
+    const data = await res.json();
+    if (data.ok) {
+      for (const [id, sec] of Object.entries(data.sections)) {
+        if (!synthSections[id]) synthSections[id] = {};
+        synthSections[id].content = sec.content || '';
+        if (sec.feedbackResult) synthSections[id].feedbackResult = sec.feedbackResult;
+        if (sec.guardianResult) synthSections[id].guardianResult = sec.guardianResult;
+      }
+    }
+  } catch(e) {}
+}
+
+async function exportPDF() {
+  notify('Generating PDF...', 'phase');
+  try {
+    const res = await fetch('/api/synthesis/export-pdf', { method: 'POST' });
+    if (!res.ok) { notify('PDF export failed', 'error'); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'metanoia-synthesis.pdf';
+    a.click();
+    URL.revokeObjectURL(url);
+    notify('PDF downloaded', 'done');
+  } catch(e) { notify('PDF export failed', 'error'); }
 }
 
 async function extractFilmBrief() {
@@ -1406,7 +1635,7 @@ async function resetAll() {
     expertResults = {}; synthesisData = {}; curatedOutputs = [];
     synthesisFull = null; filmBrief = null; selectedOutputExpert = null;
     synthesisFeedback = null; synthesisGuardian = null; activeSynthesisTab = 'content';
-    revisionVault = {};
+    revisionVault = {}; synthSections = {}; synthSectionEditing = {};
     notify('All outputs cleared', 'done');
     render();
   } catch(e) { notify('Reset failed', 'error'); }
