@@ -897,6 +897,15 @@ function renderSynthesisColumn() {
 
   html += renderSynthSectionBody();
 
+  if (curatedOutputs.length > 0) {
+    html += `<div style="border-top:1px solid var(--border);padding:0.5rem 0.6rem">
+      <div style="font-size:0.65rem;color:var(--text-muted);text-transform:uppercase;font-weight:600;margin-bottom:0.35rem">Sources (${curatedOutputs.length})</div>
+      <div style="display:flex;flex-wrap:wrap;gap:0.25rem">
+        ${curatedOutputs.map(c => `<span style="font-size:0.65rem;padding:0.15rem 0.4rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text-muted)">${escapeHtml(c.role)}</span>`).join('')}
+      </div>
+    </div>`;
+  }
+
   html += `</div>`;
   return html;
 }
