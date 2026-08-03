@@ -6,8 +6,8 @@ inputs_from:
 - 1
 include_prior_stage_context: true
 llm:
-  provider: runware
-  model: anthropic-claude-opus-4-7
+  provider: openrouter
+  model: anthropic/claude-opus-4-8
   max_tokens: 16384
 phases:
 - id: worldbuilding
@@ -40,6 +40,7 @@ phases:
   - id: psychologist
     role: Psychologist
     prompt_file: prompts/experts/psychologist.md
+  guardians: []
 style:
   aesthetic: grounded sci-fi, warm palette, organic architecture
   references: []

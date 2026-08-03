@@ -38,7 +38,7 @@ def parse_json_response(text: str):
     return json.loads(text)
 
 
-async def call_openrouter(model_id: str, prompt: str, system_prompt: str = "", timeout: int = 180) -> str:
+async def call_openrouter(model_id: str, prompt: str, system_prompt: str = "", timeout: int = 180, max_tokens: int | None = None) -> str:
     global _last_call
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
@@ -57,6 +57,10 @@ async def call_openrouter(model_id: str, prompt: str, system_prompt: str = "", t
         _last_call = asyncio.get_event_loop().time()
 
         try:
+            payload = {"model": model_id, "messages": messages}
+            if max_tokens:
+                payload["max_tokens"] = max_tokens
+
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     API_URL,
@@ -64,7 +68,7 @@ async def call_openrouter(model_id: str, prompt: str, system_prompt: str = "", t
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
-                    json={"model": model_id, "messages": messages},
+                    json=payload,
                 )
 
             try:

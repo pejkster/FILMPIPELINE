@@ -10,17 +10,24 @@ from datetime import datetime
 from dotenv import load_dotenv
 from runware import Runware, ITextInference, ITextInferenceMessage
 
+from pipeline.shared.services.openrouter_client import call_openrouter
+
 load_dotenv()
+
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "runware").lower()
 
 FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
+# "id" is the Runware model string; "openrouter_id" is the same model's slug on
+# OpenRouter (see pipeline/shared/services/openrouter_client.py's own
+# COUNCIL_MODELS, which these are copied from).
 COUNCIL_MODELS = [
-    {"id": "anthropic-claude-opus-4-8", "name": "Claude Opus 4.8", "lab": "Anthropic", "thinking": "off"},
-    {"id": "openai-gpt-5-5", "name": "GPT-5.5", "lab": "OpenAI", "thinking": "off"},
-    {"id": "google-gemini-3-1-pro", "name": "Gemini 3.1 Pro", "lab": "Google", "thinking": "low"},
-    {"id": "xai-grok-4-3", "name": "Grok 4.3", "lab": "xAI", "thinking": "off"},
-    {"id": "alibaba-qwen3-coder-plus", "name": "Qwen 3 Coder Plus", "lab": "Alibaba", "thinking": "off"},
-    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "lab": "DeepSeek", "thinking": "off"},
+    {"id": "anthropic-claude-opus-4-8", "openrouter_id": "anthropic/claude-opus-4-8", "name": "Claude Opus 4.8", "lab": "Anthropic", "thinking": "off"},
+    {"id": "openai-gpt-5-5", "openrouter_id": "openai/gpt-4.1", "name": "GPT-5.5", "lab": "OpenAI", "thinking": "off"},
+    {"id": "google-gemini-3-1-pro", "openrouter_id": "google/gemini-2.5-pro", "name": "Gemini 3.1 Pro", "lab": "Google", "thinking": "low"},
+    {"id": "xai-grok-4-3", "openrouter_id": "x-ai/grok-4.3", "name": "Grok 4.3", "lab": "xAI", "thinking": "off"},
+    {"id": "alibaba-qwen3-coder-plus", "openrouter_id": "qwen/qwen3-235b-a22b", "name": "Qwen 3 Coder Plus", "lab": "Alibaba", "thinking": "off"},
+    {"id": "deepseek-v4-pro", "openrouter_id": "deepseek/deepseek-r1", "name": "DeepSeek V4 Pro", "lab": "DeepSeek", "thinking": "off"},
 ]
 
 LABELS = ["A", "B", "C", "D", "E"]
@@ -148,12 +155,16 @@ async def _get_shared_client() -> Runware:
     return _shared_client
 
 
-async def _call_model(model_id: str, user_message: str, system_prompt: str = "", thinking_level: str = "off") -> str:
-    """Call a model via shared Runware connection."""
+async def _call_model(model: dict, user_message: str, system_prompt: str = "", thinking_level: str = "off") -> str:
+    """Call a model via the configured provider (runware or openrouter)."""
+    if LLM_PROVIDER == "openrouter":
+        return await call_openrouter(model["openrouter_id"], user_message, system_prompt=system_prompt, max_tokens=16384)
+
     client = await _get_shared_client()
+    model_id = model["id"]
 
     settings = {
-        "maxTokens": 4096,
+        "maxTokens": 16384,
         "thinkingLevel": thinking_level,
     }
     if system_prompt:
@@ -172,7 +183,7 @@ async def _call_model(model_id: str, user_message: str, system_prompt: str = "",
 async def _call_with_retry(model, prompt, emit, system_prompt="", max_attempts=5):
     for attempt in range(max_attempts):
         try:
-            result = await _call_model(model["id"], prompt, system_prompt=system_prompt, thinking_level=model.get("thinking", "off"))
+            result = await _call_model(model, prompt, system_prompt=system_prompt, thinking_level=model.get("thinking", "off"))
             await asyncio.sleep(3)
             return result
         except Exception as e:

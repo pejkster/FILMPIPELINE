@@ -230,7 +230,16 @@ class LLMCouncil:
         return self._runware
 
     async def _call_llm(self, system_prompt: str, user_message: str, own_connection: bool = False) -> str:
-        """Call Claude via Runware's text inference API."""
+        """Call the configured LLM provider (runware or openrouter)."""
+        if self.llm_config.get("provider", "runware") == "openrouter":
+            from pipeline.shared.services.openrouter_client import call_openrouter
+            return await call_openrouter(
+                self.llm_config["model"],
+                user_message,
+                system_prompt=system_prompt,
+                max_tokens=self.llm_config["max_tokens"],
+            )
+
         if own_connection:
             api_key = os.getenv("RUNWARE_API_KEY")
             client = Runware(api_key=api_key)

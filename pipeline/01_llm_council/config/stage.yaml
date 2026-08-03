@@ -3,9 +3,9 @@ name: Idea
 description: "Four-phase expert council: Research \u2192 Vision \u2192 Narrative \u2192\
   \ Treatment"
 llm:
-  provider: runware
-  model: anthropic-claude-opus-4-7
-  max_tokens: 4096
+  provider: openrouter
+  model: anthropic/claude-opus-4-8
+  max_tokens: 16384
 phases:
 - id: research
   name: Research & Grounding
@@ -70,6 +70,10 @@ phases:
   - id: scene_architect
     role: Scene Architect
     prompt_file: prompts/experts/scene_architect.md
+  guardians:
+  - id: ndrmn_project_guardian
+    role: NDRMN Project Guardian
+    prompt_file: prompts/experts/ndrmn_project_guardian.md
 - id: treatment
   name: Treatment & Deliverable Assembly
   description: Produce the final 12-page treatment and production-ready scene breakdown
